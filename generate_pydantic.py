@@ -1,1084 +1,1041 @@
-"""Generate a Pydantic schema package from `occid/lib/schema`.
+"""Generate a Pydantic package from NAFML documents.
 
 Usage:
-    python generate_pydantic.py
-    python generate_pydantic.py --output-dir schema
+    python generate_pydantic.py schema/*.yaml
+    python generate_pydantic.py schema/inav_msp.yaml --output-dir out
+    python generate_pydantic.py schema/inav_msp.yaml --check
 """
 
 from __future__ import annotations
 
 import argparse
-import shutil
+import keyword
+import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 from yaml.nodes import MappingNode, ScalarNode, SequenceNode
-from yaml.tokens import AliasToken, AnchorToken, FlowMappingStartToken, FlowSequenceStartToken, TagToken
+from yaml.tokens import (
+    AliasToken,
+    AnchorToken,
+    FlowMappingStartToken,
+    FlowSequenceStartToken,
+    TagToken,
+)
 
+YAML_FORBIDDEN_TOKENS = (
+    AliasToken,
+    AnchorToken,
+    TagToken,
+    FlowMappingStartToken,
+    FlowSequenceStartToken,
+)
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-SCHEMA_DIR = SCRIPT_DIR / "lib" / "schema" / "core"
-MODULE_DIR = SCRIPT_DIR / "lib" / "schema" / "modules"
-DEFAULT_OUTPUT_DIR = SCRIPT_DIR / "schema"
-TEMPLATE_DIR = SCRIPT_DIR / "lib" / "templates" / "pydantic"
-CORE_SCHEMA_MAX_PARTS = 3
+IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+PACKAGE_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$")
+TYPE_RE = re.compile(
+    r"^(?P<optional>optional\s+)?"
+    r"(?P<base>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)"
+    r"(?:\[(?P<count>[^\]]*)\])?$"
+)
 
-PRIMITIVE_TYPES = {
-    "string": "builtins.str",
-    "int": "builtins.int",
-    "int8": "builtins.int",
-    "int16": "builtins.int",
-    "int32": "builtins.int",
-    "int64": "builtins.int",
-    "uint8": "builtins.int",
-    "uint16": "builtins.int",
-    "uint32": "builtins.int",
-    "uint64": "builtins.int",
-    "float": "builtins.float",
-    "bool": "builtins.bool",
-    "bytes": "builtins.bytes",
-    "any": "Any",
+INT_PRIMITIVES = {
+    "int8": (-(2**7), 2**7 - 1),
+    "int16": (-(2**15), 2**15 - 1),
+    "int32": (-(2**31), 2**31 - 1),
+    "int64": (-(2**63), 2**63 - 1),
+    "uint8": (0, 2**8 - 1),
+    "uint16": (0, 2**16 - 1),
+    "uint32": (0, 2**32 - 1),
+    "uint64": (0, 2**64 - 1),
 }
+PRIMITIVES = set(INT_PRIMITIVES) | {"bool", "float32", "float64", "char", "cstring"}
 
-TYPE_KEYWORDS = {"list", "map", "tuple"}
 TOP_LEVEL_KEYS = {
     "version",
-    "type",
     "package",
-    "description",
-    "tags",
-    "root",
-    "requires",
-    "extend_variants",
+    "imports",
+    "constants",
+    "aliases",
     "enums",
-    "maps",
-    "models",
+    "bitmasks",
+    "structs",
+    "messages",
 }
-MAP_KEYS = {"type", "value"}
-MODEL_KEYS = {"description", "parent", "fields", "variants"}
-YAML_FORBIDDEN_TOKENS = {AliasToken, AnchorToken, FlowMappingStartToken, FlowSequenceStartToken, TagToken}
+ENUM_KEYS = {"prefix", "storage", "description", "values", "zero"}
+STRUCT_KEYS = {"description", "fields"}
+MESSAGE_KEYS = {"id", "request", "reply", "description"}
+PAYLOAD_KEYS = {"fields", "repeat", "description"}
+PLAIN_FIELD_KEYS = {"type", "unit", "description", "value"}
+GROUP_FIELD_KEYS = {"repeat", "fields", "description"}
+CONSTANT_KEYS = {"type", "value", "description", "configurable"}
 
 
 class SchemaError(RuntimeError):
     pass
 
 
-@dataclass
-class TypeNode:
-    kind: str
-    name: str | None = None
-    args: list["TypeNode"] = field(default_factory=list)
+# --------------------------------------------------------------------------
+# model
+# --------------------------------------------------------------------------
 
 
 @dataclass
-class EnumValue:
+class TypeRef:
+    base: str
+    optional: bool = False
+    array: str = "none"  # none | fixed | const | field | open
+    count: int | str | None = None
+
+    @property
+    def is_array(self) -> bool:
+        return self.array != "none"
+
+    @property
+    def is_text(self) -> bool:
+        return self.base == "char" and self.is_array
+
+
+@dataclass
+class Constant:
     name: str
-    value: int | str | None
-    bitflag: bool = False
+    type: str
+    value: object
+    description: str | None = None
+    configurable: str | None = None
+
+
+@dataclass
+class Alias:
+    name: str
+    target: str
+
+
+@dataclass
+class EnumMember:
+    name: str
+    value: int | None = None
+    alias_of: str | None = None
 
 
 @dataclass
 class EnumDef:
     name: str
-    values: list[EnumValue]
+    storage: str
+    prefix: str | None = None
+    description: str | None = None
+    members: list[EnumMember] = field(default_factory=list)
+    is_bitmask: bool = False
+    zero: str | None = None
 
 
 @dataclass
-class FieldDef:
+class PlainField:
     name: str
-    type_node: TypeNode
-    optional: bool
-    const: bool
-    default: object = None
-    has_default: bool = False
+    type: TypeRef
+    unit: str | None = None
+    description: str | None = None
+    value: object = None
 
 
 @dataclass
-class ModelDef:
+class GroupField:
     name: str
-    description: str | None
-    parent: str | None
-    fields: list[FieldDef]
-    variants: list[str]
-    has_variants: bool
+    repeat: int | str
+    fields: list[PlainField]
+    description: str | None = None
 
 
 @dataclass
-class MappingDef:
+class StructDef:
     name: str
-    key_type: str
-    value_type: str
-    entries: dict
+    fields: list[PlainField | GroupField]
+    description: str | None = None
 
 
 @dataclass
-class ModuleDef:
-    doc_type: str
+class Payload:
+    fields: list[PlainField | GroupField]
+    repeat: int | str | None = None
+    description: str | None = None
+
+
+@dataclass
+class MessageDef:
     name: str
-    root: str | None
-    description: str | None
+    id: int
+    request: Payload | None = None
+    reply: Payload | None = None
+    description: str | None = None
+
+
+@dataclass
+class Document:
+    package: str
     path: Path
-    tags: list[str]
-    requires: list[str]
-    extend_variants: dict[str, list[str]]
-    enums: list[EnumDef]
-    models: list[ModelDef]
-    maps: list[MappingDef]
+    version: int
+    imports: list[str] = field(default_factory=list)
+    constants: list[Constant] = field(default_factory=list)
+    aliases: list[Alias] = field(default_factory=list)
+    enums: list[EnumDef] = field(default_factory=list)
+    structs: list[StructDef] = field(default_factory=list)
+    messages: list[MessageDef] = field(default_factory=list)
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--schema-dir", type=Path, default=SCHEMA_DIR)
-    parser.add_argument("--module-dir", type=Path, default=MODULE_DIR)
-    parser.add_argument("--module", action="append", default=[])
-    parser.add_argument("--module-tag", action="append", default=[])
-    parser.add_argument("--all-modules", action="store_true")
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
-    return parser.parse_args()
+# --------------------------------------------------------------------------
+# yaml subset
+# --------------------------------------------------------------------------
 
 
-def load_template(name: str) -> str:
-    return (TEMPLATE_DIR / name).read_text().rstrip()
-
-
-def validate_yaml_node(path: Path, node: ScalarNode | SequenceNode | MappingNode) -> None:
-    if type(node) == MappingNode:
-        keys: set[str] = set()
+def validate_yaml_node(path: Path, node) -> None:
+    if isinstance(node, MappingNode):
+        seen: set[str] = set()
         for key_node, value_node in node.value:
-            if type(key_node) != ScalarNode:
-                raise SchemaError(f"mapping keys must be scalars in {path}")
-            if key_node.value in keys:
-                raise SchemaError(f"duplicate key {key_node.value!r} in {path}")
-            keys.add(key_node.value)
-            validate_yaml_node(path, key_node)
+            if not isinstance(key_node, ScalarNode):
+                raise SchemaError(f"{path}: mapping keys must be scalars")
+            if key_node.value in seen:
+                raise SchemaError(f"{path}: duplicate key {key_node.value!r}")
+            seen.add(key_node.value)
             validate_yaml_node(path, value_node)
-        return
-
-    if type(node) == SequenceNode:
+    elif isinstance(node, SequenceNode):
         for value_node in node.value:
             validate_yaml_node(path, value_node)
-        return
-
-    if type(node) != ScalarNode:
-        raise SchemaError(f"unsupported YAML node in {path}")
+    elif not isinstance(node, ScalarNode):
+        raise SchemaError(f"{path}: unsupported YAML node")
 
 
-def validate_yaml_subset(path: Path, text: str) -> None:
-    if "\t" in text:
-        raise SchemaError(f"tabs are not allowed in {path}")
-    for token in yaml.scan(text):
-        if type(token) in YAML_FORBIDDEN_TOKENS:
-            raise SchemaError(f"unsupported YAML token {type(token).__name__} in {path}")
-    node = yaml.compose(text)
-    validate_yaml_node(path, node)
-
-
-def split_default(field_text: str) -> tuple[str, str | None]:
-    depth = 0
-    for index, char in enumerate(field_text):
-        if char in "[(":
-            depth += 1
-        elif char in "])":
-            depth -= 1
-        elif char == "=" and depth == 0:
-            return field_text[:index].rstrip(), field_text[index + 1 :].strip()
-    return field_text.strip(), None
-
-
-def strip_prefix(text: str, prefix: str) -> tuple[bool, str]:
-    if text.startswith(prefix):
-        return True, text[len(prefix) :].strip()
-    return False, text
-
-
-class TypeParser:
-    def __init__(self, text: str):
-        self.text = text
-        self.pos = 0
-
-    def parse(self) -> TypeNode:
-        node = self.parse_union()
-        self.skip_ws()
-        if self.pos != len(self.text):
-            raise SchemaError(f"unexpected trailing type text: {self.text!r}")
-        return node
-
-    def parse_union(self) -> TypeNode:
-        nodes = [self.parse_atom()]
-        while True:
-            self.skip_ws()
-            if not self.consume("|"):
-                break
-            nodes.append(self.parse_atom())
-        if len(nodes) == 1:
-            return nodes[0]
-        return TypeNode(kind="union", args=nodes)
-
-    def parse_atom(self) -> TypeNode:
-        self.skip_ws()
-        if self.consume("("):
-            node = self.parse_union()
-            self.skip_ws()
-            self.expect(")")
-            return node
-
-        name = self.parse_name()
-        self.skip_ws()
-        if not self.consume("["):
-            return TypeNode(kind="name", name=name)
-
-        args = [self.parse_union()]
-        while True:
-            self.skip_ws()
-            if not self.consume(","):
-                break
-            args.append(self.parse_union())
-        self.skip_ws()
-        self.expect("]")
-        return TypeNode(kind=name, args=args)
-
-    def parse_name(self) -> str:
-        self.skip_ws()
-        start = self.pos
-        while self.pos < len(self.text) and (self.text[self.pos].isalnum() or self.text[self.pos] == "_"):
-            self.pos += 1
-        if start == self.pos:
-            raise SchemaError(f"expected type name in {self.text!r}")
-        return self.text[start:self.pos]
-
-    def skip_ws(self) -> None:
-        while self.pos < len(self.text) and self.text[self.pos].isspace():
-            self.pos += 1
-
-    def consume(self, token: str) -> bool:
-        self.skip_ws()
-        if self.text.startswith(token, self.pos):
-            self.pos += len(token)
-            return True
-        return False
-
-    def expect(self, token: str) -> None:
-        if not self.consume(token):
-            raise SchemaError(f"expected {token!r} in {self.text!r}")
-
-
-def parse_enum_value(raw_entry: str) -> EnumValue:
-    if "=" not in raw_entry:
-        return EnumValue(name=raw_entry.strip(), value=None)
-
-    name, value_text = [part.strip() for part in raw_entry.split("=", 1)]
-    if value_text.startswith(("'", '"')):
-        return EnumValue(name=name, value=yaml.safe_load(value_text))
-    if "<<" in value_text:
-        left, right = [part.strip() for part in value_text.split("<<", 1)]
-        return EnumValue(name=name, value=int(left) << int(right), bitflag=True)
-    return EnumValue(name=name, value=int(value_text))
-
-
-def parse_enum(name: str, entries: list[str]) -> EnumDef:
-    return EnumDef(name=name, values=[parse_enum_value(entry) for entry in entries])
-
-
-def parse_field(name: str, spec: str | dict) -> FieldDef:
-    if type(spec) == dict:
-        if "required" in spec:
-            raise SchemaError(f"required is not allowed on field {name}; use optional in the type")
-        if "default" in spec and "value" in spec:
-            raise SchemaError(f"default and value may not both appear on field {name}")
-        type_text = spec["type"].strip()
-        has_default = "value" in spec or "default" in spec
-        default = spec["value"] if "value" in spec else spec.get("default")
-    else:
-        type_text, default = split_default(spec)
-        has_default = default is not None
-        if default in {"[]", "{}"}:
-            raise SchemaError(f"list/map/object defaults must use expanded form on field {name}")
-        if has_default:
-            default = yaml.safe_load(default)
-
-    optional, type_text = strip_prefix(type_text, "optional ")
-    const, type_text = strip_prefix(type_text, "const ")
-    if optional and const:
-        raise SchemaError(f"optional const is invalid on field {name}")
-    if type_text.startswith("optional ") or type_text.startswith("const "):
-        raise SchemaError(f"invalid repeated type qualifier on field {name}")
-    return FieldDef(
-        name=name,
-        type_node=TypeParser(type_text).parse(),
-        optional=optional,
-        const=const,
-        default=default,
-        has_default=has_default,
-    )
-
-
-def parse_model(name: str, spec: dict) -> ModelDef:
-    unknown_keys = sorted(set(spec) - MODEL_KEYS)
-    if unknown_keys:
-        raise SchemaError(f"unknown model keys {unknown_keys} on {name}")
-    if "description" in spec and type(spec["description"]) != str:
-        raise SchemaError(f"description must be a string on {name}")
-    has_variants = "variants" in spec
-    variants = spec.get("variants") or []
-    if type(variants) != list:
-        raise SchemaError(f"variants must be a list on {name}")
-    for variant_name in variants:
-        if type(variant_name) != str:
-            raise SchemaError(f"variants must be a list of model names on {name}")
-    return ModelDef(
-        name=name,
-        description=spec.get("description"),
-        parent=spec.get("parent"),
-        fields=[parse_field(field_name, field_spec) for field_name, field_spec in (spec.get("fields") or {}).items()],
-        variants=variants,
-        has_variants=has_variants,
-    )
-
-
-def parse_mapping(name: str, spec: dict) -> MappingDef:
-    unknown_keys = sorted(set(spec) - MAP_KEYS)
-    if unknown_keys:
-        raise SchemaError(f"unknown map keys {unknown_keys} on {name}")
-    type_node = TypeParser(spec["type"]).parse()
-    if type_node.kind != "map":
-        raise SchemaError(f"mapping {name} type must be map[K, V]")
-    return MappingDef(
-        name=name,
-        key_type=type_node.args[0].name,
-        value_type=type_node.args[1].name,
-        entries=spec["value"],
-    )
-
-
-def parse_document(path: Path) -> tuple[ModuleDef, dict]:
+def load_yaml(path: Path) -> dict:
     text = path.read_text()
-    validate_yaml_subset(path, text)
+    if "\t" in text:
+        raise SchemaError(f"{path}: tabs are not allowed")
+    for token in yaml.scan(text):
+        if isinstance(token, YAML_FORBIDDEN_TOKENS):
+            raise SchemaError(f"{path}: unsupported YAML token {type(token).__name__}")
+    node = yaml.compose(text)
+    if node is None:
+        raise SchemaError(f"{path}: empty document")
+    validate_yaml_node(path, node)
     data = yaml.safe_load(text)
-    unknown_keys = sorted(set(data) - TOP_LEVEL_KEYS)
-    if unknown_keys:
-        raise SchemaError(f"unknown top-level keys {unknown_keys} in {path}")
-    for key in ("version", "type", "package", "tags"):
-        if key not in data:
-            raise SchemaError(f"missing {key} in {path}")
-    if data["type"] not in {"schema", "module"}:
-        raise SchemaError(f"type must be schema or module in {path}")
-    expected_package = path.stem.replace(".schema", "")
-    if data["type"] == "schema" and data["package"] != expected_package:
-        raise SchemaError(f"package {data['package']} does not match schema package {expected_package}")
-    if type(data["tags"]) != list:
-        raise SchemaError(f"tags must be a list in {path}")
-    for tag in data["tags"]:
-        if type(tag) != str:
-            raise SchemaError(f"tags must be strings in {path}")
+    if not isinstance(data, dict):
+        raise SchemaError(f"{path}: document root must be a mapping")
+    return data
 
-    requires = data.get("requires") or []
-    if type(requires) != list:
-        raise SchemaError(f"requires must be a list in {path}")
-    for requirement in requires:
-        if type(requirement) != str:
-            raise SchemaError(f"requires must be strings in {path}")
 
-    extend_variants = data.get("extend_variants") or {}
-    if type(extend_variants) != dict:
-        raise SchemaError(f"extend_variants must be a mapping in {path}")
-    for parent_name, variant_names in extend_variants.items():
-        if type(parent_name) != str or type(variant_names) != list:
-            raise SchemaError(f"extend_variants must map model names to lists in {path}")
-        for variant_name in variant_names:
-            if type(variant_name) != str:
-                raise SchemaError(f"extend_variants values must be model names in {path}")
+# --------------------------------------------------------------------------
+# parsing
+# --------------------------------------------------------------------------
 
-    if data["type"] == "schema":
-        for module_key in ("requires", "extend_variants"):
-            if module_key in data:
-                raise SchemaError(f"{module_key} is only valid on module files in {path}")
-        if "description" in data:
-            raise SchemaError(f"description belongs on the root model in {path}")
-        if "root" not in data:
-            raise SchemaError(f"missing root in {path}")
-        if type(data["root"]) != str:
-            raise SchemaError(f"root must be a model name in {path}")
-    else:
-        if "root" in data:
-            raise SchemaError(f"root is only valid on schema files in {path}")
-        if "description" in data and type(data["description"]) != str:
-            raise SchemaError(f"description must be a string in {path}")
 
-    return (
-        ModuleDef(
-            doc_type=data["type"],
-            name=data["package"],
-            root=data.get("root"),
-            description=data.get("description"),
-            path=path,
-            tags=data["tags"],
-            requires=requires,
-            extend_variants=extend_variants,
-            enums=[parse_enum(name, entries) for name, entries in (data.get("enums") or {}).items()],
-            models=[parse_model(name, spec) for name, spec in (data.get("models") or {}).items()],
-            maps=[parse_mapping(name, spec) for name, spec in (data.get("maps") or {}).items()],
-        ),
-        data,
+def check_keys(where: str, spec: dict, allowed: set[str]) -> None:
+    unknown = sorted(set(spec) - allowed)
+    if unknown:
+        raise SchemaError(f"{where}: unknown keys {unknown}")
+
+
+def check_ident(where: str, name: str) -> str:
+    if not isinstance(name, str) or not IDENT_RE.match(name):
+        raise SchemaError(f"{where}: invalid identifier {name!r}")
+    return name
+
+
+def parse_type(where: str, text: str) -> TypeRef:
+    if not isinstance(text, str):
+        raise SchemaError(f"{where}: type must be a string, got {text!r}")
+    match = TYPE_RE.match(text.strip())
+    if not match:
+        raise SchemaError(f"{where}: invalid type expression {text!r}")
+    base = match.group("base")
+    optional = match.group("optional") is not None
+    raw_count = match.group("count")
+    if raw_count is None:
+        return TypeRef(base=base, optional=optional)
+    count = raw_count.strip()
+    if count == "":
+        return TypeRef(base, optional, "open", None)
+    if re.fullmatch(r"\d+", count):
+        value = int(count)
+        if value <= 0:
+            raise SchemaError(f"{where}: array size must be positive in {text!r}")
+        return TypeRef(base, optional, "fixed", value)
+    if not IDENT_RE.match(count):
+        raise SchemaError(f"{where}: invalid array size {count!r} in {text!r}")
+    # constant vs field is resolved during validation
+    return TypeRef(base, optional, "const", count)
+
+
+def parse_constants(spec: dict) -> list[Constant]:
+    out = []
+    for name, body in spec.items():
+        where = f"constant {name}"
+        check_ident(where, name)
+        if isinstance(body, str):
+            match = re.fullmatch(r"\s*([A-Za-z_]\w*)\s*=\s*(.+?)\s*", body)
+            if not match:
+                raise SchemaError(f"{where}: expected 'type = value', got {body!r}")
+            ctype, raw = match.group(1), match.group(2)
+            value = yaml.safe_load(raw)
+            out.append(Constant(name, ctype, value))
+        elif isinstance(body, dict):
+            check_keys(where, body, CONSTANT_KEYS)
+            configurable = body.get("configurable")
+            if "type" not in body:
+                raise SchemaError(f"{where}: requires 'type'")
+            if configurable is None and "value" not in body:
+                raise SchemaError(f"{where}: requires 'value' unless 'configurable'")
+            if configurable is not None and "value" in body:
+                raise SchemaError(f"{where}: 'configurable' and 'value' are exclusive")
+            out.append(
+                Constant(
+                    name,
+                    body["type"],
+                    body.get("value"),
+                    body.get("description"),
+                    configurable,
+                )
+            )
+        else:
+            raise SchemaError(f"{where}: must be a string or mapping")
+    return out
+
+
+def parse_aliases(spec: dict) -> list[Alias]:
+    out = []
+    for name, target in spec.items():
+        check_ident(f"alias {name}", name)
+        if not isinstance(target, str):
+            raise SchemaError(f"alias {name}: target must be a string")
+        out.append(Alias(name, target.strip()))
+    return out
+
+
+def parse_enum_member(where: str, entry: str) -> EnumMember:
+    if not isinstance(entry, str):
+        raise SchemaError(f"{where}: enum member must be a string, got {entry!r}")
+    if "=" not in entry:
+        return EnumMember(check_ident(where, entry.strip()))
+    name, raw = [part.strip() for part in entry.split("=", 1)]
+    check_ident(where, name)
+    if re.fullmatch(r"-?\d+", raw):
+        return EnumMember(name, value=int(raw))
+    if re.fullmatch(r"0[xX][0-9a-fA-F]+", raw):
+        return EnumMember(name, value=int(raw, 16))
+    if IDENT_RE.match(raw):
+        return EnumMember(name, alias_of=raw)
+    raise SchemaError(f"{where}: enum value must be an integer or a member name, got {raw!r}")
+
+
+def parse_enum(name: str, spec: dict, is_bitmask: bool) -> EnumDef:
+    kind = "bitmask" if is_bitmask else "enum"
+    where = f"{kind} {name}"
+    check_ident(where, name)
+    if not isinstance(spec, dict):
+        raise SchemaError(f"{where}: must be a mapping")
+    check_keys(where, spec, ENUM_KEYS)
+    storage = spec.get("storage")
+    if storage not in INT_PRIMITIVES:
+        raise SchemaError(f"{where}: storage must be an integer primitive, got {storage!r}")
+    values = spec.get("values")
+    if not isinstance(values, list) or not values:
+        raise SchemaError(f"{where}: 'values' must be a non-empty list")
+    members = [parse_enum_member(where, entry) for entry in values]
+    zero = spec.get("zero")
+    if zero is not None:
+        if not is_bitmask:
+            raise SchemaError(f"{where}: 'zero' is only valid on a bitmask")
+        check_ident(where, zero)
+    return EnumDef(
+        name=name,
+        storage=storage,
+        prefix=spec.get("prefix"),
+        description=spec.get("description"),
+        members=members,
+        is_bitmask=is_bitmask,
+        zero=zero,
     )
 
 
-def load_schema_documents(schema_dir: Path) -> list[ModuleDef]:
-    modules: list[ModuleDef] = []
-    schema_names: set[str] = set()
-    for path in sorted(schema_dir.rglob("*.schema.yaml")):
-        relative_parts = path.relative_to(schema_dir).parts
-        if len(relative_parts) > CORE_SCHEMA_MAX_PARTS:
-            raise SchemaError(f"core schema files are nested too deeply: {path}")
-        module, data = parse_document(path)
-        if module.doc_type != "schema":
-            raise SchemaError(f"type must be schema in core schema dir: {path}")
-        if data["package"] in schema_names:
-            raise SchemaError(f"duplicate schema package {data['package']} in {path}")
-        schema_names.add(data["package"])
-        modules.append(module)
-    return modules
-
-
-def load_available_module_documents(module_dir: Path) -> list[ModuleDef]:
-    if not module_dir.exists():
-        return []
-    modules: list[ModuleDef] = []
-    for path in sorted(module_dir.rglob("*.schema.yaml")):
-        module, data = parse_document(path)
-        if module.doc_type != "module":
-            raise SchemaError(f"type must be module in module dir: {path}")
-        modules.append(module)
-    return modules
-
-
-def select_module_documents(
-    available_modules: list[ModuleDef], selected_names: list[str], selected_tags: list[str], all_modules: bool
-) -> list[ModuleDef]:
-    selected: dict[str, ModuleDef] = {}
-    modules_by_name = {module.name: module for module in available_modules}
-    if len(modules_by_name) != len(available_modules):
-        raise SchemaError("duplicate module packages in module dir")
-
-    selected_tag_set = set(selected_tags)
-    if all_modules:
-        for module in available_modules:
-            selected[module.name] = module
-    for module in available_modules:
-        if module.name in selected_names or selected_tag_set.intersection(module.tags):
-            selected[module.name] = module
-        if set(selected_names).intersection(module.tags):
-            selected[module.name] = module
-
-    changed = True
-    while changed:
-        changed = False
-        satisfied_names = {"core", *selected}
-        satisfied_tags = {"core"}
-        for module in selected.values():
-            satisfied_tags.update(module.tags)
-        for module in list(selected.values()):
-            for requirement in module.requires:
-                if requirement in satisfied_names or requirement in satisfied_tags:
-                    continue
-                if requirement in modules_by_name:
-                    selected[requirement] = modules_by_name[requirement]
-                    changed = True
-                    continue
-                matching_modules = [candidate for candidate in available_modules if requirement in candidate.tags]
-                for candidate in matching_modules:
-                    if candidate.name not in selected:
-                        selected[candidate.name] = candidate
-                        changed = True
-
-    satisfied_names = {"core", *selected}
-    satisfied_tags = {"core"}
-    for module in selected.values():
-        satisfied_tags.update(module.tags)
-    for module in selected.values():
-        for requirement in module.requires:
-            if requirement not in satisfied_names and requirement not in satisfied_tags:
-                raise SchemaError(f"unsatisfied requirement {requirement} in {module.path}")
-    return sorted(selected.values(), key=lambda module: module.name)
-
-
-def apply_extend_variants(modules: list[ModuleDef]) -> None:
-    models_by_name: dict[str, ModelDef] = {}
-    model_paths: dict[str, Path] = {}
-    for module in modules:
-        for model_def in module.models:
-            if model_def.name in models_by_name:
-                raise SchemaError(f"duplicate model {model_def.name} in {module.path} and {model_paths[model_def.name]}")
-            models_by_name[model_def.name] = model_def
-            model_paths[model_def.name] = module.path
-
-    for module in modules:
-        if module.doc_type != "module":
-            continue
-        for parent_name, variant_names in module.extend_variants.items():
-            if parent_name not in models_by_name:
-                raise SchemaError(f"extend_variants references unknown parent {parent_name} in {module.path}")
-            parent_model = models_by_name[parent_name]
-            parent_model.has_variants = True
-            existing_members = {variant_member_name(parent_name, variant_name) for variant_name in parent_model.variants}
-            for variant_name in variant_names:
-                if variant_name not in models_by_name:
-                    raise SchemaError(f"extend_variants references unknown child {variant_name} in {module.path}")
-                if models_by_name[variant_name].parent != parent_name:
-                    raise SchemaError(f"extend_variants child {variant_name} parent is not {parent_name} in {module.path}")
-                member_name = variant_member_name(parent_name, variant_name)
-                if member_name in existing_members:
-                    raise SchemaError(f"extend_variants member {parent_name}.{member_name} already exists in {module.path}")
-                existing_members.add(member_name)
-                parent_model.variants.append(variant_name)
-
-
-def load_modules(
-    schema_dir: Path, module_dir: Path, selected_names: list[str], selected_tags: list[str], all_modules: bool
-) -> list[ModuleDef]:
-    schema_modules = load_schema_documents(schema_dir)
-    selected_modules = select_module_documents(load_available_module_documents(module_dir), selected_names, selected_tags, all_modules)
-    modules = schema_modules + selected_modules
-    apply_extend_variants(modules)
-    return modules
-
-
-def build_symbol_index(modules: list[ModuleDef]) -> dict[str, str]:
-    symbols = {"OCCIDModel": "common", "IntEnum": "common"}
-    for module in modules:
-        for enum_def in module.enums:
-            if enum_def.name in symbols:
-                raise SchemaError(f"duplicate symbol {enum_def.name} in {module.path}")
-            symbols[enum_def.name] = module.name
-        for model_def in module.models:
-            if model_def.variants:
-                enum_name = variant_enum_name(model_def.name)
-                if enum_name in symbols:
-                    raise SchemaError(f"duplicate symbol {enum_name} in {module.path}")
-                symbols[enum_name] = module.name
-        for model_def in module.models:
-            if model_def.name in symbols:
-                raise SchemaError(f"duplicate symbol {model_def.name} in {module.path}")
-            symbols[model_def.name] = module.name
-    return symbols
-
-
-def build_enum_members(modules: list[ModuleDef]) -> dict[str, set[str]]:
-    enum_members: dict[str, set[str]] = {}
-    for module in modules:
-        for enum_def in module.enums:
-            members: set[str] = set()
-            for value in enum_def.values:
-                if value.name in members:
-                    raise SchemaError(f"duplicate enum member {enum_def.name}.{value.name} in {module.path}")
-                members.add(value.name)
-            enum_members[enum_def.name] = members
-        for model_def in module.models:
-            if model_def.variants:
-                enum_name = variant_enum_name(model_def.name)
-                members = set(variant_member_name(model_def.name, variant_name) for variant_name in model_def.variants)
-                if len(members) != len(model_def.variants):
-                    raise SchemaError(f"duplicate derived variant member in {module.path}:{model_def.name}")
-                enum_members[enum_name] = members
-    return enum_members
-
-
-def variant_enum_name(model_name: str) -> str:
-    return f"{model_name}_type"
-
-
-def screaming_snake(name: str) -> str:
-    parts: list[str] = []
-    current = ""
-    for char in name:
-        if char.isupper() and current:
-            parts.append(current)
-            current = char
-        else:
-            current += char
-    if current:
-        parts.append(current)
-    return "_".join(part.upper() for part in parts)
-
-
-def variant_member_name(parent_name: str, child_name: str) -> str:
-    parent_root = parent_name[4:] if parent_name.startswith("Base") else parent_name
-    child_root = child_name[4:] if child_name.startswith("Base") else child_name
-    if child_root.startswith(parent_root) and child_root != parent_root:
-        child_root = child_root[len(parent_root) :]
-    elif child_root.endswith(parent_root) and child_root != parent_root:
-        child_root = child_root[: -len(parent_root)]
-    return screaming_snake(child_root)
-
-
-def collect_type_refs(node: TypeNode) -> set[str]:
-    if node.kind == "name":
-        if node.name in PRIMITIVE_TYPES or node.name in TYPE_KEYWORDS:
-            return set()
-        return {node.name}
-    refs: set[str] = set()
-    for arg in node.args:
-        refs.update(collect_type_refs(arg))
-    return refs
-
-
-def validate_schema(modules: list[ModuleDef], symbol_index: dict[str, str], enum_members: dict[str, set[str]]) -> None:
-    models_by_name = {model_def.name: model_def for module in modules for model_def in module.models}
-    for module in modules:
-        if module.doc_type == "schema":
-            if module.root not in models_by_name:
-                raise SchemaError(f"root {module.root} is not a declared model in {module.path}")
-            if models_by_name[module.root].description is None:
-                raise SchemaError(f"root model {module.root} is missing description in {module.path}")
-    for module in modules:
-        for mapping_def in module.maps:
-            for type_name in (mapping_def.key_type, mapping_def.value_type):
-                if type_name not in PRIMITIVE_TYPES and type_name not in symbol_index:
-                    raise SchemaError(f"unknown mapping type {type_name} in {module.path}:{mapping_def.name}")
-            if mapping_def.key_type in enum_members:
-                for key in mapping_def.entries:
-                    if key not in enum_members[mapping_def.key_type]:
-                        raise SchemaError(f"invalid mapping key {mapping_def.key_type}.{key} in {module.path}:{mapping_def.name}")
-        for model_def in module.models:
-            if model_def.parent and model_def.parent not in symbol_index:
-                raise SchemaError(f"unknown parent {model_def.parent} in {module.path}")
-            for variant_name in model_def.variants:
-                if variant_name not in symbol_index:
-                    raise SchemaError(f"unknown variant {variant_name} in {module.path}:{model_def.name}")
-            for field_def in model_def.fields:
-                unknown_refs = sorted(ref for ref in collect_type_refs(field_def.type_node) if ref not in symbol_index)
-                if unknown_refs:
-                    raise SchemaError(f"unknown type refs {unknown_refs} in {module.path}:{model_def.name}.{field_def.name}")
-                if field_def.const and not field_def.has_default:
-                    raise SchemaError(f"const field without value in {module.path}:{model_def.name}.{field_def.name}")
-                type_name = field_def.type_node.name if field_def.type_node.kind == "name" else None
-                if type_name in enum_members and type(field_def.default) == str and field_def.default not in enum_members[type_name]:
-                    raise SchemaError(
-                        f"invalid enum default {type_name}.{field_def.default} in {module.path}:{model_def.name}.{field_def.name}"
-                    )
-    for module in modules:
-        for model_def in module.models:
-            for variant_name in model_def.variants:
-                if models_by_name[variant_name].parent != model_def.name:
-                    raise SchemaError(f"variant {variant_name} parent is not {model_def.name} in {module.path}")
-
-
-def python_type_expr(node: TypeNode, variant_type_members: dict[str, list[str]]) -> str:
-    if node.kind == "name":
-        if node.name in PRIMITIVE_TYPES:
-            return PRIMITIVE_TYPES[node.name]
-        variant_names = variant_type_members.get(node.name) or []
-        if variant_names:
-            return f"SerializeAsAny[{' | '.join([node.name, *variant_names])}]"
-        return node.name
-    if node.kind == "list":
-        return f"list[{python_type_expr(node.args[0], variant_type_members)}]"
-    if node.kind == "map":
-        return f"dict[{python_type_expr(node.args[0], variant_type_members)}, {python_type_expr(node.args[1], variant_type_members)}]"
-    if node.kind == "tuple":
-        return f"tuple[{', '.join(python_type_expr(arg, variant_type_members) for arg in node.args)}]"
-    if node.kind == "union":
-        return " | ".join(python_type_expr(arg, variant_type_members) for arg in node.args)
-    raise SchemaError(f"unsupported type node {node.kind}")
-
-
-def field_annotation(field_def: FieldDef, variant_type_members: dict[str, list[str]]) -> str:
-    python_type = python_type_expr(field_def.type_node, variant_type_members)
-    if field_def.const and field_def.default is not None and field_def.type_node.kind == "name":
-        if field_def.type_node.name in {"string", "int", "float", "bool"}:
-            return f"Literal[{python_default_literal(field_def.default)}]"
-    if field_def.optional:
-        if field_def.type_node.kind == "union":
-            return f"({python_type}) | None"
-        return f"{python_type} | None"
-    return python_type
-
-
-def python_default_literal(value: object) -> str:
-    if value is True:
-        return "True"
-    if value is False:
-        return "False"
-    if type(value) == str:
-        return repr(value)
-    if type(value) in {int, float}:
-        return repr(value)
-    if value == "true":
-        return "True"
-    if value == "false":
-        return "False"
-    if value == "[]":
-        return "[]"
-    if value == "{}":
-        return "{}"
-    return repr(value) if type(value) != str else value
-
-
-def enum_default_expr(type_name: str, default: str, enum_members: dict[str, set[str]]) -> str:
-    if default not in enum_members[type_name]:
-        raise SchemaError(f"invalid enum default {type_name}.{default}")
-    return f"{type_name}.{default}"
-
-
-def field_assignment(field_def: FieldDef, enum_members: dict[str, set[str]], variant_type_members: dict[str, list[str]]) -> str:
-    annotation = field_annotation(field_def, variant_type_members)
-
-    if field_def.const:
-        type_name = field_def.type_node.name if field_def.type_node.kind == "name" else None
-        if type_name in enum_members:
-            default_expr = enum_default_expr(type_name, field_def.default, enum_members)
-        else:
-            default_expr = python_default_literal(field_def.default)
-        return f"{annotation} = Field(default={default_expr}, frozen=True)"
-
-    if not field_def.has_default:
-        if field_def.optional:
-            return f"{annotation} = None"
-        return annotation
-
-    if field_def.default is None:
-        return f"{annotation} = None"
-
-    if type(field_def.default) == list:
-        if field_def.type_node.kind != "list":
-            raise SchemaError(f"list default on non-list field {field_def.name}")
-        if not field_def.default:
-            return f"{annotation} = Field(default_factory=list)"
-        return f"{annotation} = Field(default_factory=lambda: {repr(field_def.default)})"
-
-    if type(field_def.default) == dict:
-        if field_def.type_node.kind == "map":
-            if not field_def.default:
-                return f"{annotation} = Field(default_factory=dict)"
-            return f"{annotation} = Field(default_factory=lambda: {repr(field_def.default)})"
-        if field_def.type_node.kind == "name" and field_def.type_node.name not in PRIMITIVE_TYPES:
-            if not field_def.default:
-                return f"{annotation} = Field(default_factory={field_def.type_node.name})"
-            return f"{annotation} = Field(default_factory=lambda: {repr(field_def.default)})"
-        raise SchemaError(f"object default on unsupported field {field_def.name}")
-
-    if field_def.default == "[]":
-        if field_def.type_node.kind != "list":
-            raise SchemaError(f"list default on non-list field {field_def.name}")
-        return f"{annotation} = Field(default_factory=list)"
-
-    if field_def.default == "{}":
-        if field_def.type_node.kind == "map":
-            return f"{annotation} = Field(default_factory=dict)"
-        if field_def.type_node.kind == "name" and field_def.type_node.name not in PRIMITIVE_TYPES:
-            return f"{annotation} = Field(default_factory={field_def.type_node.name})"
-        raise SchemaError(f"object default on unsupported field {field_def.name}")
-
-    type_name = field_def.type_node.name if field_def.type_node.kind == "name" else None
-    if type_name in enum_members and type(field_def.default) == str:
-        default_expr = enum_default_expr(type_name, field_def.default, enum_members)
-    else:
-        default_expr = python_default_literal(field_def.default)
-    return f"{annotation} = {default_expr}"
-
-
-def enum_base(enum_def: EnumDef) -> str:
-    has_string_values = any(type(value.value) == str for value in enum_def.values if value.value is not None)
-    if any(value.bitflag for value in enum_def.values):
-        if has_string_values:
-            raise SchemaError(f"bitflag enum {enum_def.name} cannot contain string values")
-        return "IntFlag"
-    return "str, Enum" if has_string_values else "IntEnum"
-
-
-def render_enum_block(enum_def: EnumDef) -> str:
-    lines = [f"class {enum_def.name}({enum_base(enum_def)}):"]
-    next_value: int | None = None
-    for index, value in enumerate(enum_def.values):
-        if type(value.value) == str:
-            lines.append(f"    {value.name} = {repr(value.value)}")
-            continue
-        if type(value.value) == int:
-            lines.append(f"    {value.name} = {value.value}")
-            next_value = value.value + 1
-            continue
-        if index == 0 or next_value is None:
-            raise SchemaError(f"first enum member {enum_def.name}.{value.name} must have an explicit integer value")
-        lines.append(f"    {value.name} = auto()")
-        next_value += 1
-    return "\n".join(lines)
-
-
-def render_variant_enum_block(model_def: ModelDef) -> str:
-    enum_def = EnumDef(
-        name=variant_enum_name(model_def.name),
-        values=[
-            EnumValue(name=variant_member_name(model_def.name, variant_name), value=0 if index == 0 else None)
-            for index, variant_name in enumerate(model_def.variants)
-        ],
+def parse_field(where: str, name: str, spec) -> PlainField | GroupField:
+    check_ident(where, name)
+    if isinstance(spec, str):
+        return PlainField(name, parse_type(where, spec))
+    if not isinstance(spec, dict):
+        raise SchemaError(f"{where}: field must be a string or mapping")
+    if "repeat" in spec or ("fields" in spec and "type" not in spec):
+        check_keys(where, spec, GROUP_FIELD_KEYS)
+        if "repeat" not in spec or "fields" not in spec:
+            raise SchemaError(f"{where}: repeated group needs both 'repeat' and 'fields'")
+        inner = parse_fields(where, spec["fields"])
+        for sub in inner:
+            if isinstance(sub, GroupField):
+                raise SchemaError(f"{where}: repeated groups may not nest")
+        return GroupField(name, spec["repeat"], inner, spec.get("description"))
+    for banned in ("required", "default", "const"):
+        if banned in spec:
+            raise SchemaError(f"{where}: '{banned}' is not a NAFML field key")
+    check_keys(where, spec, PLAIN_FIELD_KEYS)
+    if "type" not in spec:
+        raise SchemaError(f"{where}: expanded field requires 'type'")
+    return PlainField(
+        name,
+        parse_type(where, spec["type"]),
+        spec.get("unit"),
+        spec.get("description"),
+        spec.get("value"),
     )
-    return render_enum_block(enum_def)
 
 
-def model_type_refs(model_def: ModelDef) -> set[str]:
-    refs: set[str] = set()
-    if model_def.parent:
-        refs.add(model_def.parent)
-    for field_def in model_def.fields:
-        refs.update(collect_type_refs(field_def.type_node))
-    return refs
+def parse_fields(where: str, spec) -> list[PlainField | GroupField]:
+    if not isinstance(spec, dict) or not spec:
+        raise SchemaError(f"{where}: 'fields' must be a non-empty mapping")
+    return [parse_field(f"{where}.{n}", n, body) for n, body in spec.items()]
 
 
-def runtime_type_refs(model_def: ModelDef, enum_members: dict[str, set[str]]) -> set[str]:
-    refs: set[str] = set()
-    if model_def.parent:
-        refs.add(model_def.parent)
-    for field_def in model_def.fields:
-        if field_def.type_node.kind == "name" and field_def.type_node.name in enum_members and field_def.default is not None:
-            refs.add(field_def.type_node.name)
-        if field_def.type_node.kind == "name" and field_def.default == "{}":
-            refs.add(field_def.type_node.name)
-        if field_def.type_node.kind == "name" and type(field_def.default) == dict:
-            refs.add(field_def.type_node.name)
-    return refs
+def parse_struct(name: str, spec: dict) -> StructDef:
+    where = f"struct {name}"
+    check_ident(where, name)
+    if not isinstance(spec, dict):
+        raise SchemaError(f"{where}: must be a mapping")
+    check_keys(where, spec, STRUCT_KEYS)
+    if "fields" not in spec:
+        raise SchemaError(f"{where}: requires 'fields'")
+    return StructDef(name, parse_fields(where, spec["fields"]), spec.get("description"))
 
 
-def module_imports(module: ModuleDef, symbol_index: dict[str, str], enum_members: dict[str, set[str]]) -> list[str]:
-    imports_by_module: dict[str, set[str]] = {}
-    for mapping_def in module.maps:
-        for ref in (mapping_def.key_type, mapping_def.value_type):
-            if ref in PRIMITIVE_TYPES:
-                continue
-            ref_module = symbol_index[ref]
-            if ref_module in {module.name, "common"}:
-                continue
-            imports_by_module.setdefault(ref_module, set()).add(ref)
-    for model_def in module.models:
-        for ref in sorted(runtime_type_refs(model_def, enum_members)):
-            ref_module = symbol_index[ref]
-            if ref_module in {module.name, "common"}:
-                continue
-            imports_by_module.setdefault(ref_module, set()).add(ref)
-    lines = []
-    for ref_module in sorted(imports_by_module):
-        symbols = ", ".join(sorted(imports_by_module[ref_module]))
-        lines.append(f"from .{ref_module} import {symbols}")
-    return lines
+def parse_payload(where: str, spec) -> Payload | None:
+    if spec is None:
+        return None
+    if not isinstance(spec, dict):
+        raise SchemaError(f"{where}: payload must be null or a mapping")
+    check_keys(where, spec, PAYLOAD_KEYS)
+    if "fields" not in spec:
+        raise SchemaError(f"{where}: payload requires 'fields'")
+    return Payload(
+        parse_fields(where, spec["fields"]), spec.get("repeat"), spec.get("description")
+    )
 
 
-def render_model_block(
-    model_def: ModelDef,
-    enum_members: dict[str, set[str]],
-    variant_type_members: dict[str, list[str]],
-    model_ids: dict[str, int],
-) -> str:
-    parent = model_def.parent or "OCCIDModel"
-    lines = [f"class {model_def.name}({parent}):"]
-    if model_def.description:
-        lines.append(f"    {model_def.description!r}")
-    lines.append(f"    __occid_model_id__: ClassVar[int] = {model_ids[model_def.name]}")
-    for field_def in model_def.fields:
-        lines.append(f"    {field_def.name}: {field_assignment(field_def, enum_members, variant_type_members)}")
-    return "\n".join(lines)
+def parse_message(name: str, spec: dict) -> MessageDef:
+    where = f"message {name}"
+    check_ident(where, name)
+    if not isinstance(spec, dict):
+        raise SchemaError(f"{where}: must be a mapping")
+    check_keys(where, spec, MESSAGE_KEYS)
+    for required in ("id", "request", "reply"):
+        if required not in spec:
+            raise SchemaError(f"{where}: requires '{required}'")
+    if not isinstance(spec["id"], int) or isinstance(spec["id"], bool):
+        raise SchemaError(f"{where}: 'id' must be an integer")
+    return MessageDef(
+        name=name,
+        id=spec["id"],
+        request=parse_payload(f"{where}.request", spec["request"]),
+        reply=parse_payload(f"{where}.reply", spec["reply"]),
+        description=spec.get("description"),
+    )
 
 
-def mapping_key_literal(key: object, key_type: str, enum_members: dict[str, set[str]]) -> str:
-    if key_type in enum_members:
-        return f"{key_type}.{key}"
-    return repr(key)
+def parse_document(path: Path) -> Document:
+    data = load_yaml(path)
+    check_keys(str(path), data, TOP_LEVEL_KEYS)
+    for required in ("version", "package"):
+        if required not in data:
+            raise SchemaError(f"{path}: missing '{required}'")
+    package = data["package"]
+    if not isinstance(package, str) or not PACKAGE_RE.match(package):
+        raise SchemaError(f"{path}: invalid package name {package!r}")
 
-
-def mapping_value_literal(value: object, value_type: str, enum_members: dict[str, set[str]]) -> str:
-    if value_type in enum_members:
-        return f"{value_type}.{value}"
-    return repr(value)
-
-
-def render_mapping_block(mapping_def: MappingDef, enum_members: dict[str, set[str]], variant_type_members: dict[str, list[str]]) -> str:
-    lines = [
-        f"{mapping_def.name}: dict[{python_type_expr(TypeParser(mapping_def.key_type).parse(), variant_type_members)}, {python_type_expr(TypeParser(mapping_def.value_type).parse(), variant_type_members)}] = {{"
+    doc = Document(package=package, path=path, version=data["version"])
+    doc.imports = list(data.get("imports") or [])
+    doc.constants = parse_constants(data.get("constants") or {})
+    doc.aliases = parse_aliases(data.get("aliases") or {})
+    doc.enums = [
+        parse_enum(n, s, False) for n, s in (data.get("enums") or {}).items()
+    ] + [parse_enum(n, s, True) for n, s in (data.get("bitmasks") or {}).items()]
+    doc.structs = [parse_struct(n, s) for n, s in (data.get("structs") or {}).items()]
+    doc.messages = [
+        parse_message(n, s) for n, s in (data.get("messages") or {}).items()
     ]
-    for key, value in mapping_def.entries.items():
-        key_expr = mapping_key_literal(key, mapping_def.key_type, enum_members)
-        value_expr = mapping_value_literal(value, mapping_def.value_type, enum_members)
-        lines.append(f"    {key_expr}: {value_expr},")
-    lines.append("}")
-    return "\n".join(lines)
+    return doc
 
 
-def render_common_runtime() -> str:
-    sections = [load_template("common_header.py"), load_template("common_intenum.py"), load_template("common_runtime.py")]
-    return "\n\n".join(section.rstrip() for section in sections if section).rstrip() + "\n"
+# --------------------------------------------------------------------------
+# validation
+# --------------------------------------------------------------------------
 
 
-def render_module(
-    module: ModuleDef,
-    symbol_index: dict[str, str],
-    enum_members: dict[str, set[str]],
-    variant_type_members: dict[str, list[str]],
-    model_ids: dict[str, int],
-) -> str:
-    sections = [load_template("module_header.py")]
-    imports = module_imports(module, symbol_index, enum_members)
-    if imports:
-        sections.append("\n".join(imports))
-    if module.enums:
-        sections.append("### Enums")
-        enum_blocks = [render_enum_block(enum_def) for enum_def in module.enums]
-        sections.append("\n\n".join(enum_blocks))
-    if module.maps:
-        sections.append("### Mappings")
-        sections.append(
-            "\n\n".join(render_mapping_block(mapping_def, enum_members, variant_type_members) for mapping_def in module.maps)
-        )
-    if module.models:
-        sections.append("### Models")
-        sections.append(
-            "\n\n".join(render_model_block(model_def, enum_members, variant_type_members, model_ids) for model_def in module.models)
-        )
-    return "\n\n".join(section.rstrip() for section in sections if section).rstrip() + "\n"
+class Validator:
+    def __init__(self, docs: list[Document]):
+        self.docs = docs
+        self.errors: list[str] = []
+        self.types: dict[str, str] = {}
+        self.constants: dict[str, Constant] = {}
+        self.structs: dict[str, StructDef] = {}
+        self.enums: dict[str, EnumDef] = {}
+        self.aliases: dict[str, Alias] = {}
 
+    def error(self, message: str) -> None:
+        self.errors.append(message)
 
-def render_common_schema_module(
-    module: ModuleDef,
-    enum_members: dict[str, set[str]],
-    variant_type_members: dict[str, list[str]],
-    model_ids: dict[str, int],
-) -> str:
-    sections = []
-    if module.enums:
-        sections.append("### Schema Enums")
-        enum_blocks = [render_enum_block(enum_def) for enum_def in module.enums]
-        sections.append("\n\n".join(enum_blocks))
-    if module.maps:
-        sections.append("### Schema Mappings")
-        sections.append(
-            "\n\n".join(render_mapping_block(mapping_def, enum_members, variant_type_members) for mapping_def in module.maps)
-        )
-    if module.models:
-        sections.append("### Schema Models")
-        sections.append(
-            "\n\n".join(render_model_block(model_def, enum_members, variant_type_members, model_ids) for model_def in module.models)
-        )
-    return "\n\n".join(section.rstrip() for section in sections if section).rstrip()
+    def run(self) -> None:
+        self.index()
+        for doc in self.docs:
+            for alias in doc.aliases:
+                self.check_alias(alias)
+            for enum in doc.enums:
+                self.check_enum(enum)
+            for struct in doc.structs:
+                self.check_fields(f"struct {struct.name}", struct.fields, in_payload=False)
+            for message in doc.messages:
+                for side in ("request", "reply"):
+                    payload = getattr(message, side)
+                    if payload is not None:
+                        self.check_payload(f"message {message.name}.{side}", payload)
+        if self.errors:
+            raise SchemaError("\n".join(f"  - {e}" for e in self.errors))
 
+    def index(self) -> None:
+        seen_packages: set[str] = set()
+        for doc in self.docs:
+            if doc.package in seen_packages:
+                self.error(f"duplicate package {doc.package}")
+            seen_packages.add(doc.package)
+            for collection, store in (
+                (doc.aliases, self.aliases),
+                (doc.enums, self.enums),
+                (doc.structs, self.structs),
+            ):
+                for item in collection:
+                    if item.name in self.types:
+                        self.error(f"duplicate type name {item.name}")
+                    self.types[item.name] = doc.package
+                    store[item.name] = item
+            for constant in doc.constants:
+                if constant.name in self.constants:
+                    self.error(f"duplicate constant {constant.name}")
+                self.constants[constant.name] = constant
+            ids: dict[int, str] = {}
+            names: set[str] = set()
+            for message in doc.messages:
+                if message.name in names:
+                    self.error(f"duplicate message {message.name}")
+                names.add(message.name)
+                if message.id in ids:
+                    self.error(
+                        f"duplicate message id {message.id} "
+                        f"({ids[message.id]} and {message.name})"
+                    )
+                ids[message.id] = message.name
 
-def build_variant_type_members(modules: list[ModuleDef], symbol_index: dict[str, str]) -> dict[str, list[str]]:
-    schema_module_names = {module.name for module in modules if module.doc_type == "schema"}
-    models_by_name = {model_def.name: model_def for module in modules for model_def in module.models}
-    children_by_parent: dict[str, list[str]] = {}
-    for model_def in models_by_name.values():
-        if model_def.parent:
-            children_by_parent.setdefault(model_def.parent, []).append(model_def.name)
-    variant_type_members: dict[str, list[str]] = {}
+    def check_alias(self, alias: Alias) -> None:
+        seen = {alias.name}
+        target = alias.target
+        while target not in PRIMITIVES:
+            if target in self.enums or target in self.structs:
+                self.error(f"alias {alias.name}: may not target a struct, enum, or bitmask")
+                return
+            if target not in self.aliases:
+                self.error(f"alias {alias.name}: unknown target {target!r}")
+                return
+            if target in seen:
+                self.error(f"alias {alias.name}: alias cycle")
+                return
+            seen.add(target)
+            target = self.aliases[target].target
 
-    def collect_schema_variants(model_name: str, seen: set[str]) -> list[str]:
-        variant_names: list[str] = []
-        for variant_name in [*models_by_name[model_name].variants, *children_by_parent.get(model_name, [])]:
-            if variant_name in seen:
+    def check_enum(self, enum: EnumDef) -> None:
+        where = ("bitmask " if enum.is_bitmask else "enum ") + enum.name
+        low, high = INT_PRIMITIVES[enum.storage]
+        width = high.bit_length() + (1 if low < 0 else 0)
+        names: set[str] = set()
+        literals: dict[int, str] = {}
+        if enum.zero is not None:
+            names.add(enum.zero)
+        for member in enum.members:
+            if member.name in names:
+                self.error(f"{where}: duplicate member {member.name}")
+            names.add(member.name)
+            if member.alias_of is not None:
+                if member.alias_of not in names:
+                    self.error(
+                        f"{where}: member {member.name} aliases "
+                        f"{member.alias_of!r}, which is not an earlier member"
+                    )
                 continue
-            seen.add(variant_name)
-            if symbol_index[variant_name] not in schema_module_names:
+            if member.value is None:
                 continue
-            variant_names.append(variant_name)
-            variant_names.extend(collect_schema_variants(variant_name, seen))
-        return variant_names
+            if enum.is_bitmask:
+                if not 0 <= member.value < width:
+                    self.error(
+                        f"{where}: bit position {member.value} out of range "
+                        f"for {enum.storage}"
+                    )
+            elif not low <= member.value <= high:
+                self.error(
+                    f"{where}: value {member.value} does not fit in {enum.storage}"
+                )
+            # Distinct enum names may share a value (SERVO_BICOPTER_LEFT and
+            # SERVO_FLAPPERON_2 are both 4). Bit positions may not.
+            if enum.is_bitmask and member.value in literals:
+                self.error(
+                    f"{where}: duplicate bit position {member.value} "
+                    f"({literals[member.value]} and {member.name})"
+                )
+            literals[member.value] = member.name
 
-    for module in modules:
-        for model_def in module.models:
-            variant_names = collect_schema_variants(model_def.name, set())
-            if variant_names:
-                variant_type_members[model_def.name] = variant_names
-    return variant_type_members
+    def check_payload(self, where: str, payload: Payload) -> None:
+        self.check_repeat(where, payload.repeat, [], allow_until_end=True)
+        self.check_fields(where, payload.fields, in_payload=True)
+
+    def check_repeat(self, where: str, repeat, preceding, allow_until_end: bool) -> None:
+        if repeat is None:
+            return
+        if isinstance(repeat, int) and not isinstance(repeat, bool):
+            if repeat <= 0:
+                self.error(f"{where}: repeat must be positive")
+            return
+        if repeat == "until_end":
+            if not allow_until_end:
+                self.error(f"{where}: 'until_end' is only valid in a message payload")
+            return
+        if not isinstance(repeat, str) or not IDENT_RE.match(repeat):
+            self.error(f"{where}: invalid repeat {repeat!r}")
+            return
+        if repeat in self.constants:
+            return
+        if repeat in preceding:
+            return
+        self.error(f"{where}: repeat {repeat!r} is not a constant or preceding field")
+
+    def check_fields(self, where: str, fields, in_payload: bool) -> None:
+        seen: list[str] = []
+        saw_optional = False
+        saw_open = False
+        for index, item in enumerate(fields):
+            last = index == len(fields) - 1
+            if item.name in seen:
+                self.error(f"{where}: duplicate field {item.name}")
+            if isinstance(item, GroupField):
+                self.check_repeat(
+                    f"{where}.{item.name}",
+                    item.repeat,
+                    seen,
+                    allow_until_end=in_payload and last,
+                )
+                self.check_fields(f"{where}.{item.name}", item.fields, in_payload=False)
+                seen.append(item.name)
+                continue
+
+            ref = item.type
+            self.check_type(f"{where}.{item.name}", ref, seen)
+            if ref.optional:
+                saw_optional = True
+            elif saw_optional:
+                self.error(
+                    f"{where}.{item.name}: required field follows an optional field; "
+                    f"optional fields must form a contiguous suffix"
+                )
+            if ref.array == "open":
+                if not (in_payload and last):
+                    self.error(
+                        f"{where}.{item.name}: open-ended array is only valid "
+                        f"as the final field of a message payload"
+                    )
+                saw_open = True
+            seen.append(item.name)
+        # A trailing open array may follow optional fields: the optionals are
+        # fixed width and consumed in order, then the array takes the rest.
+
+    def check_type(self, where: str, ref: TypeRef, preceding: list[str]) -> None:
+        base = ref.base.split(".")[-1] if "." in ref.base else ref.base
+        if base == "cstring" and ref.is_array:
+            self.error(f"{where}: cstring is self-delimiting and takes no array size")
+        if base not in PRIMITIVES and base not in self.types:
+            self.error(f"{where}: unknown type {ref.base!r}")
+        if ref.array == "const":
+            name = str(ref.count)
+            if name in self.constants:
+                constant = self.constants[name]
+                if constant.configurable is None and (
+                    not isinstance(constant.value, int) or constant.value <= 0
+                ):
+                    self.error(f"{where}: array size constant {name!r} must be a positive integer")
+                ref.array = "const"
+            elif name in preceding:
+                ref.array = "field"
+            else:
+                self.error(
+                    f"{where}: array size {name!r} is neither a constant "
+                    f"nor a preceding field"
+                )
 
 
-def module_dependency_graph(
-    modules: list[ModuleDef], symbol_index: dict[str, str], enum_members: dict[str, set[str]]
-) -> dict[str, set[str]]:
-    graph: dict[str, set[str]] = {}
-    module_names = {module.name for module in modules}
-    for module in modules:
-        refs: set[str] = set()
-        for requirement in module.requires:
-            if requirement in module_names and requirement != module.name:
-                refs.add(requirement)
-        for mapping_def in module.maps:
-            for ref in (mapping_def.key_type, mapping_def.value_type):
-                if ref in symbol_index and symbol_index[ref] != module.name:
-                    refs.add(symbol_index[ref])
-        for model_def in module.models:
-            for ref in runtime_type_refs(model_def, enum_members):
-                ref_module = symbol_index[ref]
-                if ref_module not in {module.name, "common"}:
-                    refs.add(ref_module)
-        graph[module.name] = refs
-    return graph
+# --------------------------------------------------------------------------
+# emission
+# --------------------------------------------------------------------------
 
 
-def topo_sort_modules(modules: list[ModuleDef], graph: dict[str, set[str]]) -> list[str]:
-    remaining = {module.name for module in modules}
-    ordered: list[str] = []
-    while remaining:
-        ready = sorted(name for name in remaining if graph[name].issubset(set(ordered)))
-        if not ready:
-            cycle = ", ".join(sorted(remaining))
-            raise SchemaError(f"cyclic module dependencies: {cycle}")
-        ordered.extend(ready)
-        remaining.difference_update(ready)
-    return ordered
+def pascal(name: str) -> str:
+    parts = re.split(r"[^A-Za-z0-9]+", name)
+    out = []
+    for part in parts:
+        if not part:
+            continue
+        out.append(part[0].upper() + part[1:] if not part.isupper() else part.capitalize())
+    return "".join(out) or "X"
 
 
-def render_init(module_names: list[str]) -> str:
-    lines = ["from .common import *"]
-    lines.extend(f"from .{name} import *" for name in module_names if name != "common")
-    lines.extend(
-        [
-            "",
-            "for _model in [obj for obj in list(globals().values()) if OCCIDModel in getattr(obj, \"__mro__\", ()) and obj is not OCCIDModel]:",
-            "    _model.model_rebuild(_types_namespace=globals())",
-        ]
-    )
+def safe_attr(name: str) -> str:
+    if keyword.iskeyword(name) or name in {"model_config", "model_fields"}:
+        return name + "_"
+    return name
+
+
+def module_name(package: str) -> str:
+    return package.replace(".", "_")
+
+
+class Emitter:
+    def __init__(self, doc: Document, validator: Validator):
+        self.doc = doc
+        self.v = validator
+        self.lines: list[str] = []
+
+    def write(self, text: str = "") -> None:
+        self.lines.append(text)
+
+    def render(self) -> str:
+        self.header()
+        self.constants()
+        self.aliases()
+        self.enums()
+        self.structs()
+        self.messages()
+        return "\n".join(self.lines).rstrip() + "\n"
+
+    def header(self) -> None:
+        self.write('"""Generated by generate_pydantic.py from NAFML. Do not edit."""')
+        self.write()
+        self.write("from __future__ import annotations")
+        self.write()
+        self.write("from enum import IntEnum, IntFlag")
+        self.write("from typing import Annotated, Final")
+        self.write()
+        self.write("from pydantic import BaseModel, ConfigDict, Field")
+        self.write()
+        for name in self.doc.imports:
+            self.write(f"from .{module_name(name)} import *  # noqa: F403")
+        if self.doc.imports:
+            self.write()
+        self.write()
+        used = self.used_int_primitives()
+        if used:
+            self.write("# width-constrained integer aliases")
+            for name in sorted(used, key=lambda n: (n[0] != "i", n)):
+                low, high = INT_PRIMITIVES[name]
+                self.write(f"{name} = Annotated[int, Field(ge={low}, le={high})]")
+            self.write()
+            self.write()
+
+    def used_int_primitives(self) -> set[str]:
+        used: set[str] = set()
+
+        def visit_fields(fields):
+            for item in fields:
+                if isinstance(item, GroupField):
+                    visit_fields(item.fields)
+                    continue
+                base = self.resolve_primitive(item.type.base)
+                if base in INT_PRIMITIVES and not item.type.is_text:
+                    used.add(base)
+
+        for struct in self.doc.structs:
+            visit_fields(struct.fields)
+        for message in self.doc.messages:
+            for payload in (message.request, message.reply):
+                if payload:
+                    visit_fields(payload.fields)
+        return used
+
+    def resolve_primitive(self, name: str) -> str:
+        seen = set()
+        while name in self.v.aliases and name not in seen:
+            seen.add(name)
+            name = self.v.aliases[name].target
+        return name
+
+    def annotation(self, ref: TypeRef) -> str:
+        base = ref.base.split(".")[-1]
+        if ref.is_text:
+            inner = "str"
+        else:
+            resolved = self.resolve_primitive(base)
+            if resolved == "bool":
+                inner = "bool"
+            elif resolved in ("float32", "float64"):
+                inner = "float"
+            elif resolved in ("char", "cstring"):
+                inner = "str"
+            elif resolved in INT_PRIMITIVES:
+                inner = base if base in self.v.aliases or base in self.v.enums else resolved
+            else:
+                inner = pascal(base)
+            if ref.is_array:
+                inner = f"list[{inner}]"
+        if ref.optional:
+            inner = f"{inner} | None"
+        return inner
+
+    def field_line(self, item: PlainField, indent: str = "    ") -> list[str]:
+        annotation = self.annotation(item.type)
+        name = safe_attr(item.name)
+        bits = []
+        if item.type.optional:
+            bits.append("default=None")
+        if item.type.array == "fixed" and not item.type.is_text:
+            bits.append(f"min_length={item.type.count}")
+            bits.append(f"max_length={item.type.count}")
+        if item.type.is_text and item.type.array == "fixed":
+            bits.append(f"max_length={item.type.count}")
+        doc = " ".join(x for x in (item.description, f"[{item.unit}]" if item.unit else None) if x)
+        if doc:
+            bits.append(f"description={doc.strip()!r}")
+        if name != item.name:
+            bits.append(f"alias={item.name!r}")
+        if bits:
+            assignment = f" = Field({', '.join(bits)})"
+        else:
+            assignment = ""
+        return [f"{indent}{name}: {annotation}{assignment}"]
+
+    def render_fields(self, fields, prefix: str, indent: str = "    ") -> tuple[list[str], list[str]]:
+        """Return (body lines, nested class blocks)."""
+        body: list[str] = []
+        nested: list[str] = []
+        for item in fields:
+            if isinstance(item, GroupField):
+                group_name = f"{prefix}{pascal(item.name)}Item"
+                inner_body, inner_nested = self.render_fields(item.fields, group_name)
+                nested.extend(inner_nested)
+                block = [f"class {group_name}(BaseModel):"]
+                block.append("    model_config = ConfigDict(populate_by_name=True)")
+                block.append("")
+                block.extend(inner_body)
+                nested.append("\n".join(block))
+                body.append(f"{indent}{safe_attr(item.name)}: list[{group_name}]")
+            else:
+                body.extend(self.field_line(item, indent))
+        return body, nested
+
+    def model_block(self, name: str, fields, description: str | None) -> str:
+        body, nested = self.render_fields(fields, name)
+        out = []
+        for block in nested:
+            out.append(block)
+            out.append("")
+            out.append("")
+        out.append(f"class {name}(BaseModel):")
+        if description:
+            out.append(f'    """{description}"""')
+            out.append("")
+        out.append("    model_config = ConfigDict(populate_by_name=True)")
+        out.append("")
+        out.extend(body)
+        return "\n".join(out)
+
+    def constants(self) -> None:
+        if not self.doc.constants:
+            return
+        for constant in self.doc.constants:
+            hint = "int" if isinstance(constant.value, int) else type(constant.value).__name__
+            self.write(f"{constant.name}: Final[{hint}] = {constant.value!r}")
+        self.write()
+        self.write()
+
+    def aliases(self) -> None:
+        if not self.doc.aliases:
+            return
+        for alias in self.doc.aliases:
+            resolved = self.resolve_primitive(alias.target)
+            if resolved in INT_PRIMITIVES:
+                low, high = INT_PRIMITIVES[resolved]
+                self.write(f"{alias.name} = Annotated[int, Field(ge={low}, le={high})]")
+            elif resolved in ("float32", "float64"):
+                self.write(f"{alias.name} = float")
+            elif resolved == "char":
+                self.write(f"{alias.name} = str")
+            else:
+                self.write(f"{alias.name} = {resolved}")
+        self.write()
+        self.write()
+
+    def enums(self) -> None:
+        for enum in self.doc.enums:
+            base = "IntFlag" if enum.is_bitmask else "IntEnum"
+            self.write(f"class {pascal(enum.name)}({base}):")
+            if enum.description:
+                self.write(f'    """{enum.description}"""')
+                self.write()
+            emitted: dict[str, int] = {}
+            counter = 0
+            if enum.zero is not None:
+                label = enum.zero
+                if enum.prefix and not label.startswith(enum.prefix):
+                    label = f"{enum.prefix}_{label}"
+                self.write(f"    {label} = 0")
+            for member in enum.members:
+                label = member.name
+                if enum.prefix and not label.startswith(enum.prefix):
+                    label = f"{enum.prefix}_{label}"
+                if member.alias_of is not None:
+                    value = emitted.get(member.alias_of, 0)
+                else:
+                    value = member.value if member.value is not None else counter
+                emitted[member.name] = value
+                counter = value + 1
+                literal = f"1 << {value}" if enum.is_bitmask else str(value)
+                self.write(f"    {label} = {literal}")
+            self.write()
+            self.write()
+
+    def structs(self) -> None:
+        for struct in self.order_structs():
+            self.write(self.model_block(pascal(struct.name), struct.fields, struct.description))
+            self.write()
+            self.write()
+
+    def order_structs(self) -> list[StructDef]:
+        by_name = {s.name: s for s in self.doc.structs}
+        ordered: list[StructDef] = []
+        state: dict[str, int] = {}
+
+        def visit(struct: StructDef) -> None:
+            if state.get(struct.name) == 2:
+                return
+            if state.get(struct.name) == 1:
+                raise SchemaError(f"struct dependency cycle at {struct.name}")
+            state[struct.name] = 1
+            for item in struct.fields:
+                refs = item.fields if isinstance(item, GroupField) else [item]
+                for sub in refs:
+                    dep = sub.type.base.split(".")[-1]
+                    if dep in by_name and dep != struct.name:
+                        visit(by_name[dep])
+            state[struct.name] = 2
+            ordered.append(struct)
+
+        for struct in self.doc.structs:
+            visit(struct)
+        return ordered
+
+    def messages(self) -> None:
+        if not self.doc.messages:
+            return
+        registry: list[str] = []
+        for message in self.doc.messages:
+            base = pascal(message.name)
+            self.write(f"{message.name}: Final[int] = {message.id}")
+            self.write()
+            entry: list[str] = []
+            for side in ("request", "reply"):
+                payload = getattr(message, side)
+                if payload is None:
+                    entry.append("None")
+                    continue
+                cls = f"{base}{side.capitalize()}"
+                if payload.repeat is not None:
+                    item_cls = f"{cls}Item"
+                    self.write(self.model_block(item_cls, payload.fields, payload.description))
+                    self.write()
+                    self.write()
+                    self.write(f"class {cls}(BaseModel):")
+                    self.write("    model_config = ConfigDict(populate_by_name=True)")
+                    self.write()
+                    self.write(f"    items: list[{item_cls}]")
+                    repeat = payload.repeat
+                    self.write(f"    # repeat: {repeat}")
+                else:
+                    self.write(
+                        self.model_block(
+                            cls, payload.fields, payload.description or message.description
+                        )
+                    )
+                self.write()
+                self.write()
+                entry.append(cls)
+            registry.append(f"    {message.name}: ({', '.join(entry)}),")
+        self.write("# message id -> (request model, reply model), None where absent")
+        self.write("MESSAGES: Final[dict[int, tuple]] = {")
+        for line in registry:
+            self.write(line)
+        self.write("}")
+        self.write()
+
+
+# --------------------------------------------------------------------------
+# driver
+# --------------------------------------------------------------------------
+
+
+def render_init(docs: list[Document]) -> str:
+    lines = ['"""Generated by generate_pydantic.py from NAFML. Do not edit."""', ""]
+    for doc in docs:
+        lines.append(f"from . import {module_name(doc.package)}  # noqa: F401")
     lines.append("")
-    lines.append('__all__ = [name for name in globals() if not name.startswith("_")]')
+    lines.append("__all__ = [")
+    for doc in docs:
+        lines.append(f'    "{module_name(doc.package)}",')
+    lines.append("]")
     return "\n".join(lines) + "\n"
 
 
-def write_package(output_dir: Path, modules: list[ModuleDef], symbol_index: dict[str, str], enum_members: dict[str, set[str]]) -> None:
-    graph = module_dependency_graph(modules, symbol_index, enum_members)
-    ordered_names = topo_sort_modules(modules, graph)
-    module_map = {module.name: module for module in modules}
-    variant_type_members = build_variant_type_members(modules, symbol_index)
-    model_ids: dict[str, int] = {}
-    for module_name in ordered_names:
-        for model_def in module_map[module_name].models:
-            model_ids[model_def.name] = len(model_ids)
-
-    if output_dir.exists():
-        shutil.rmtree(output_dir)
-    output_dir.mkdir(parents=True)
-    common_sections = [render_common_runtime().rstrip()]
-    if "common" in module_map:
-        common_sections.append(render_common_schema_module(module_map["common"], enum_members, variant_type_members, model_ids))
-    (output_dir / "common.py").write_text("\n\n".join(section for section in common_sections if section).rstrip() + "\n")
-
-    for module_name in ordered_names:
-        if module_name == "common":
-            continue
-        module = module_map[module_name]
-        (output_dir / f"{module_name}.py").write_text(
-            render_module(module, symbol_index, enum_members, variant_type_members, model_ids)
-        )
-
-    (output_dir / "__init__.py").write_text(render_init(ordered_names))
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Generate Pydantic models from NAFML.")
+    parser.add_argument("sources", nargs="+", type=Path, help="NAFML YAML documents")
+    parser.add_argument("--output-dir", type=Path, default=Path("schema"))
+    parser.add_argument(
+        "--check", action="store_true", help="validate only, write nothing"
+    )
+    return parser.parse_args()
 
 
-def main() -> None:
+def main() -> int:
     args = parse_args()
-    modules = load_modules(args.schema_dir, args.module_dir, args.module, args.module_tag, args.all_modules)
-    symbol_index = build_symbol_index(modules)
-    enum_members = build_enum_members(modules)
-    validate_schema(modules, symbol_index, enum_members)
-    write_package(args.output_dir, modules, symbol_index, enum_members)
-    print(f"schema_dir={args.schema_dir}")
-    print(f"module_dir={args.module_dir}")
-    print(f"output_dir={args.output_dir}")
-    print(f"module_count={len(modules)}")
+    paths: list[Path] = []
+    for source in args.sources:
+        paths.extend(sorted(source.glob("*.yaml")) if source.is_dir() else [source])
+
+    try:
+        docs = [parse_document(path) for path in paths]
+        validator = Validator(docs)
+        validator.run()
+    except SchemaError as exc:
+        print(f"error:\n{exc}", file=sys.stderr)
+        return 1
+
+    counts = {
+        "documents": len(docs),
+        "constants": sum(len(d.constants) for d in docs),
+        "aliases": sum(len(d.aliases) for d in docs),
+        "enums": sum(len(d.enums) for d in docs),
+        "structs": sum(len(d.structs) for d in docs),
+        "messages": sum(len(d.messages) for d in docs),
+    }
+    summary = ", ".join(f"{v} {k}" for k, v in counts.items())
+
+    if args.check:
+        print(f"ok: {summary}")
+        return 0
+
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    for doc in docs:
+        target = args.output_dir / f"{module_name(doc.package)}.py"
+        target.write_text(Emitter(doc, validator).render())
+    (args.output_dir / "__init__.py").write_text(render_init(docs))
+    print(f"wrote {len(docs) + 1} files to {args.output_dir}: {summary}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

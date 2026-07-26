@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+
+# generated artifacts
+out/
+inav_msp.yaml
+conversion_notes.txt

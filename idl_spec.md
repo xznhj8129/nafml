@@ -1,559 +1,674 @@
-**YAML IDL Spec**
+# NAFML — Not Another Fucking Markup Language
 
-**1. Scope**
-This is a custom schema IDL written in YAML.
-YAML is only the carrier syntax. The schema language is defined here.
-Specific example names are not definitive.
+**Spec version 1 (draft)**
 
-**2. YAML Subset**
-- YAML version: `1.2`
-- Allowed: mappings, sequences, plain scalars, quoted scalars, comments
-- Additional 4-space indentation levels are legal for readability even when they do not add structure, as long as the YAML structure is unchanged
-- Forbidden: anchors, aliases, tags, flow-style objects/lists, duplicate keys, tabs
+## 1. Scope
+
+NAFML is a small interface definition language for binary protocols and the
+data structures around them. It was written to describe INAV's MSP protocol,
+enums, and SDK types, but nothing in the core language is INAV-specific.
+
+YAML is the carrier syntax only. The language is defined here, not by YAML.
+
+The core language has twelve concepts and no more:
+
+package, imports, constants, aliases, enums, bitmasks, structs, fields,
+arrays, optional fields, messages, comments.
+
+There is no inheritance, no polymorphism, no discriminated unions, no
+ontology, and no root type. What you see in a file is what exists.
+
+### 1.1. Non-goals
+
+NAFML deliberately does not include the OCCID IDL features it was derived
+from: `parent`, `variants`, implicit discriminator enums, class expansion
+files, module manifests, `extend_variants`, ontological ordering, tags and
+profiles, and the rule that every file declares a root model. Those are
+application semantics, not IDL semantics.
+
+Those features can be reintroduced by a separate layer (`occid-ontology`)
+that consumes NAFML structs and applies its own parent/variant rules. The
+generic compiler knows nothing about it.
+
+---
+
+## 2. YAML subset
+
+- YAML version 1.2
+- Allowed: mappings, sequences, plain scalars, double-quoted scalars, comments
+- Forbidden: anchors, aliases, YAML tags, flow-style collections, duplicate
+  keys, tabs
 - Unknown keys are errors
-- string literals must be quoted with `"` in schema examples and authored schema
+- String literals in schema documents are double-quoted
+- Extra indentation levels are legal for readability where they do not change
+  the parsed structure
 
-**3. Top-Level Document**
+---
 
-A schema document is either a **class expansion file** (`type: schema`) or a **module manifest** (`type: module`). They share the same IDL syntax for enums, maps, and models, but differ in header fields and resolution rules.
+## 3. Document
 
-Common top-level keys (both types):
-- `version` — required
-- `type` — required, either `schema` or `module`
-- `package` — required, the document's package/output module identifier
-- `tags` — required, list of profile tags for subset selection (see section 17.3)
-- `enums`
-- `maps`
-- `models`
+A document is a single YAML file with this header:
 
-**3.1. Class expansion file** (`type: schema`) — additional keys:
-- `root` — required; the primary model owned by this schema file
-
-**3.2. Module manifest** (`type: module`) — additional keys:
-- `description` — optional, human-readable package purpose
-- `requires` — optional, list of tags or module packages this module depends on
-- `extend_variants` — optional, grafts new variants onto existing parents (see section 18.4)
-
-Example class expansion file:
 ```yaml
 version: 1
-type: schema
-package: state
-root: State
-tags:
-  - core
-
-enums: 
-maps: 
-models:
-  State:
-    description: "State data describing current object condition and telemetry."
-    parent: Information
+package: inav.gps
 ```
 
-Minimal schema file:
+Both keys are required. Optionally:
+
 ```yaml
-version: 1
-type: schema
-package: object
-root: Object
-tags:
-  - core
-
-models:
-  Object:
-    description: "Top-level object branch."
-    parent: Root
-    variants:
-      - Entity
-      ...
+imports:
+  - inav.units
+  - inav.geo
 ```
 
-Example module manifest:
-```yaml
-version: 1
-type: module
-package: ew
-description: "Electronic warfare actions, effects, protection, and spectrum management."
-tags:
-  - plugin123
-requires:
-  - core
-```
+Followed by any of the section keys, in any order, all optional:
 
-**4. Names**
+`constants`, `aliases`, `enums`, `bitmasks`, `structs`, `messages`
+
+A file may declare nothing but a header. A file may declare only messages, or
+only enums. There is no required section and no primary type.
+
+### 3.1. Packages
+
+- Package regex: `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$`
+- A package must be unique across all loaded documents
+- The filename does not have to match the package, and the directory layout
+  carries no meaning. Both are organizational only.
+
+### 3.2. Imports
+
+An import names a package, never a file path. How a package name resolves to a
+file is up to the compiler's search path and is outside this spec.
+
+A name from an imported package is referenced by its bare name. If two
+imported packages export the same bare name, the reference is ambiguous and
+must be written fully qualified as `package.Name`. Ambiguity that is never
+referenced is not an error.
+
+Imports are not transitive: importing `inav.geo` does not bring in what
+`inav.geo` itself imports. Import cycles are an error.
+
+---
+
+## 4. Names
+
 - Identifier regex: `^[A-Za-z_][A-Za-z0-9_]*$`
-- Names must be unique across `enums`, `maps`, and `models`
-- Field names use the same identifier regex
-- All model and enum names are globally unique and imported flat — the ontological hierarchy is encoded in parent/variants relationships, not in qualified import paths
-- For schema files, `package` must match the schema file basename without `.schema.yaml`
-- For module files, `package` must be globally unique across loaded packages
+- Type names — structs, enums, bitmasks, aliases — share one namespace per
+  package and must be unique within it
+- Constants have their own namespace, as do messages
+- Field names must be unique within their struct or payload
 
-**5. Primitive Types**
-Built-in primitive types:
-- `string`
-- `int`
-- `int8`
-- `int16`
-- `int32`
-- `int64`
-- `uint8`
-- `uint16`
-- `uint32`
-- `uint64`
-- `float`
-- `bool`
-- `bytes`
-- `any`
+Conventions, not enforced: `PascalCase` for types, `snake_case` for fields,
+`SCREAMING_SNAKE_CASE` for constants and enum members, `MSP_LIKE_NAMES` for
+messages.
 
-**6. Type Expressions**
-Valid type expressions:
-- `string`
-- `TaskType`
-- `GlobalPosition`
-- `list[string]`
-- `list[GlobalPosition]`
-- `map[string, string]`
-- `map[string, GlobalPosition]`
-- `tuple[float, float]`
-- `tuple[string, int, bool]`
-- `optional string`
-- `optional list[string]`
-- `const TaskType`
-- `const map[string, GeometryTypes]`
+---
+
+## 5. Primitive types
+
+```
+bool
+int8    int16    int32    int64
+uint8   uint16   uint32   uint64
+float32 float64
+char    cstring
+```
+
+`char` is an 8-bit character intended for text. It is distinct from `uint8` so
+that generators can emit `char` rather than `uint8_t` and so that `char[]`
+reads as a string.
+
+`cstring` is a NUL-terminated character sequence. It is self-delimiting: it
+carries its own length on the wire, so unlike `char[]` it may appear anywhere
+in a payload rather than only at the end, and it takes no array size. INAV uses
+both forms — `MSP2_COMMON_SETTING_INFO` opens with a NUL-terminated name and
+then continues with eleven more fields.
+
+There is no `string` type. A string is `char[N]` when it is fixed-width,
+`char[len_field]` when a preceding field gives its length, and `char[]` when it
+runs to the end of the payload. Adding `string` would require this spec to
+mandate an encoding and a length prefix; the wire formats NAFML describes do
+not agree on either.
+
+There is no `bytes`, `any`, `list`, `map`, or `tuple`. Use `uint8[]` for opaque
+bytes.
+
+Everything is little-endian and unpadded unless a backend documents otherwise.
+Structs are flattened on the wire — nesting is an authoring convenience, not a
+layout construct.
+
+---
+
+## 6. Type expressions
+
+| Form | Meaning |
+| --- | --- |
+| `T` | a primitive, alias, enum, bitmask, or struct |
+| `T[N]` | fixed array of `N` elements |
+| `T[COUNT]` | array sized by a declared constant |
+| `T[field_name]` | array sized by the value of a preceding field |
+| `T[]` | array running to the end of the payload |
+| `optional T` | see section 11 |
+| `package.T` | a fully qualified name (section 3.2) |
 
 Rules:
-- `optional` means the field may be absent
-- `const` means the field value is fixed and not user-supplied
-- `optional const ...` is invalid
-- `tuple[T1, T2, ...]` is an ordered fixed-length heterogeneous container
-- no inline anonymous object types
-- write imports, then `\n##Enums\n`, then enums, then `\n##models\n`, then models
-- One newline between enums, two newlines between models
-- Order by ontological order
-- Use IntEnum for where only one aspect of the same attritube can be true
-- Use List[IntEnum] as a bitflag for where many aspects of the same attritube can be true
-- Preserve descriptive comments
 
-**7. Enums**
-Syntax:
+- Arrays are one-dimensional. `T[4][4]` is not valid; declare a struct.
+- `N` is an integer literal greater than zero.
+- `COUNT` must name a declared integer constant with a positive value.
+- `field_name` must name an unsigned integer field earlier in the same struct
+  or payload. Forward references are an error.
+- `T[]` may only appear on the last field of a payload, and only inside a
+  message payload — a struct with an open-ended tail could not be nested
+  safely.
+- `optional` may combine with any array form.
+- `cstring` takes no array size; it is already variable-length.
+
+---
+
+## 7. Constants
+
+```yaml
+constants:
+  MAX_SUPPORTED_MOTORS: uint8 = 18
+  BUILD_DATE_LENGTH: uint8 = 11
+  NAV_MAX_WAYPOINTS: uint16 = 120
+```
+
+Expanded form, when a constant needs prose:
+
+```yaml
+constants:
+  NAV_MAX_WAYPOINTS:
+    type: uint16
+    value: 120
+    description: "Maximum waypoints storable in a mission."
+```
+
+Rules:
+
+- The value is a literal: integer, float, or bool. Matching the declared type
+  is required.
+- Expressions are not supported in version 1. `LED_MODE_COUNT * 4 + 2` must be
+  written as its computed value. This is a deliberate limitation — see
+  section 16.
+- Constants are usable as array sizes and as `repeat` counts.
+
+A constant whose value is fixed by build configuration rather than by the
+schema declares `configurable` instead of `value`, naming the build symbol that
+supplies it:
+
+```yaml
+constants:
+  MAX_SUPPORTED_MOTORS:
+    type: uint8
+    configurable: TARGET_MOTOR_COUNT
+    description: "Per-target motor count."
+```
+
+`configurable` and `value` are mutually exclusive. A configurable constant may
+be used as an array size or repeat count, but generation fails unless a value
+is supplied for it, so a wrong layout cannot be emitted silently.
+
+---
+
+## 8. Aliases
+
+```yaml
+aliases:
+  timeMs_t: uint32
+  gpsCoordinate_t: int32
+  boxBitmask_t: uint64
+```
+
+An alias target must be a primitive or another alias. Aliasing a struct, enum,
+or bitmask is an error, as is an alias cycle.
+
+An alias is a name for a representation, not a distinct type: a `timeMs_t`
+field and a `uint32` field are interchangeable. Backends may emit a real
+typedef or collapse the alias to its primitive.
+
+---
+
+## 9. Enums and bitmasks
+
+### 9.1. Enums
+
+An enum is a set of mutually exclusive values.
+
 ```yaml
 enums:
-  EnumName:
-    - VALUE = 0
-    - NEXT
-    - OTHER = 7
-    - FLAG_A = 1 << 1
-    - FLAG_B = 1 << 2
+  GpsFix:
+    prefix: GPS_FIX
+    storage: uint8
+    description: "GPS fix quality."
+    values:
+      - NONE = 0
+      - TWO_D = 1
+      - THREE_D = 2
 ```
 
-Rules:
-- Each item is `NAME`, `NAME = INT`, `NAME = "string"`, or `NAME = 1 << INT`
-- First unassigned item gets `0`
-- Later unassigned items auto-increment from previous
-- Any enum using `1 << INT` values is generated as a bitflag enum
-- Enum numeric values must be unique
-- Enum names must be unique within the enum
+- `storage` is required and must be an integer primitive
+- `prefix` is optional; when present it is prepended to each member name with
+  an underscore in generated output
+- A member is `NAME`, `NAME = INT`, or `NAME = EARLIER_MEMBER`
+- The first unassigned member is `0`; later unassigned members increment from
+  the previous member
+- `NAME = EARLIER_MEMBER` declares an alias and must reference a member
+  declared before it. Forward references are an error.
+- Member names must be unique within the enum, and every value must fit in
+  `storage`
+- Values need **not** be unique. Two members may independently carry the same
+  value, which C enums do routinely: INAV declares `SERVO_FLAPPERON_2 = 4` and
+  `SERVO_BICOPTER_LEFT = 4` because they are the same output index named for
+  different airframes. A decoder resolving a value back to a name takes the
+  first member that declares it.
 
-**8. Constant Maps**
-Syntax:
+### 9.2. Bitmasks
+
+A bitmask is a set of independently settable flags. It is declared
+explicitly — no enum is ever silently reinterpreted as flags.
+
 ```yaml
-maps:
-  MapName:
-    type: map[string, GeometryTypes]
-    value:
-      "Point": POINT
-      "Polygon": POLYGON
+bitmasks:
+  SensorFlags:
+    prefix: SENSOR
+    storage: uint16
+    values:
+      - ACC = 0
+      - BARO = 1
+      - MAG = 2
+      - GPS = 3
 ```
 
-Rules:
-- `maps` defines named constant maps
-- `type` must be `map[K, V]`
-- `value` must be a YAML mapping
-- keys and values must match the declared map type
+Values are **bit positions**, not pre-shifted masks. A position must be unique
+and less than the bit width of `storage`. Unlike an enum, a bitmask may not
+repeat a position — two names for one flag are indistinguishable on decode.
 
-**9. models**
-Syntax:
+Unassigned members take the next free position, starting at `0`.
+
+Because every member is a position, no member can express "no flags set" —
+position `0` already means bit 0. A bitmask that needs a named empty value
+declares it with `zero`:
+
 ```yaml
-models:
-  ModelName:
-    description: "Human-readable model purpose."
+bitmasks:
+  BootEventFlags:
+    prefix: BOOT_EVENT_FLAGS
+    storage: uint16
+    zero: NONE
+    values:
+      - WARNING = 0
+      - ERROR = 1
+```
+
+`zero` names a member emitted with the value `0`. It is optional, valid only on
+a bitmask, and its name must not collide with a flag.
+
+---
+
+## 10. Structs and fields
+
+```yaml
+structs:
+  GeoLocation:
+    description: "WGS-84 position."
     fields:
-      field_a: string
-      field_b: optional string
-      field_c: float = 0.0
-      field_d: const TaskType = MOVE
+      latitude:
+        type: int32
+        unit: degrees_e7
+      longitude:
+        type: int32
+        unit: degrees_e7
+      altitude:
+        type: int32
+        unit: centimeters
+
+  GpsSolution:
+    fields:
+      fix: GpsFix
+      satellites: uint8
+      location: GeoLocation
+      ground_speed: uint16
+      ground_course: uint16
+      hdop: uint16
 ```
 
-Rules:
-- `description` is optional on ordinary models and required on a schema file's root model
-- `parent` is optional
-- `fields` is optional. If absent, the model defines no own fields (inherited fields from a parent still apply)
-- `parent` must reference another model
-- inheritance is single-parent only
-- child fields are appended after parent fields
-- redefining an inherited field is an error
-- a model may define `variants` to create a typed child family (see section 13)
-- a child model inherits all fields from its `parent`
-- if the parent defines `variants`, the child is a typed variant of that parent
-- a model may be both a child and a parent, allowing nested typed hierarchies
-- branch models should stay flat and lightweight; inline nested authoring is reserved for final fielded leaves inside `variants`
+`description` is optional everywhere. `fields` is required and must be
+non-empty — an empty struct has no representation.
 
-**10. Field Shorthand**
-Allowed shorthand forms:
-- `name: Type`
-- `name: optional Type`
-- `name: Type = scalar_default`
-- `name: Type = null`
-- `name: optional Type = scalar_default`
-- `name: const Type = scalar_or_enum_value`
+Field order is declaration order and is significant: it is the wire order.
 
-Examples:
+### 10.1. Shorthand and expanded field forms
+
+Shorthand is `name: TypeExpression` and is preferred when the field needs
+nothing else:
+
 ```yaml
-task_id: string
-remarks: optional string
-speed_ms: float = 0.0
-expires_at: int64 = null
-task_type: const TaskType = MOVE
-path: list[GlobalPosition]
+fix: GpsFix
+satellites: uint8
+target_name: char[32]
 ```
 
-Rules:
-- shorthand defaults are only for scalar values, enum values, and `null`
-- list/map/object defaults must use expanded form
-- inline form is preferred for fields that only need a type, optionality, or scalar default
-- expanded form is used when a field needs additional metadata
+Expanded form is used when a field carries metadata:
 
-**11. Expanded Field Form**
-Syntax:
 ```yaml
 pwm:
-  type: int
-  min: 900
-  max: 2100
-  default: 1500
-
-alphabet:
-  type: list[string]
-  default:
-    - a
-    - b
-    - c
-  description: Human text
+  type: uint16
+  unit: microseconds
+  description: "Output pulse width."
 ```
 
-Allowed keys:
-- `type` required
-- `default` optional
-- `value` optional
-- `description` optional, comments preferred if inline
+Allowed keys in expanded form:
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `type` | yes | a type expression |
+| `unit` | no | free-text unit label |
+| `description` | no | free text |
+| `value` | no | fixed wire value (see below) |
+
+A field is either a plain field, which has `type`, or a repeated group, which
+has `repeat` and `fields` instead (section 12). No field has both.
+
+`unit` has no meaning to the compiler. It is carried through to generated
+output as documentation. Suggested labels: `degrees_e7`, `centimeters`,
+`meters`, `centimeters_per_second`, `microseconds`, `milliseconds`, `hz`,
+`degrees`, `decidegrees`, `percent`, `millivolts`, `centiamps`.
+
+`value` marks a field whose wire value is fixed — a reserved or legacy byte
+that must be transmitted as a specific constant. INAV has 63 of them. Encoders
+emit it without asking the caller; decoders may verify it. It is not a default:
+the field always occupies its space on the wire and callers cannot override it.
+
+There is no `required` key; a field is required unless marked `optional`.
+There is no `default` and no `const`. NAFML describes wire layout, not
+configuration policy.
+
+---
+
+## 11. Optional fields
+
+`optional T` means the field may be absent from the payload.
+
+There is no presence bitmap and no tag on the wire, so presence is positional:
+
+- Optional fields must form a contiguous suffix of their struct or payload. An
+  optional field followed by a required field is an error.
+- If an optional field is present, every optional field before it is present.
+- A decoder stops when the payload is exhausted; every optional field not
+  reached is absent.
+
+This is exactly how a protocol grows: new fields are appended to the end of an
+existing message and older peers simply stop early.
+
+A trailing `T[]` array may follow optional fields. Because the optional fields
+are fixed width, a decoder consumes them in order while bytes remain and the
+array takes whatever is left. This is ambiguous if a payload arrives with a
+partial optional run, so a decoder should treat a short remainder as an error
+rather than guess. `MSP_SIMULATOR` relies on this shape.
+
+---
+
+## 12. Repeated groups
+
+A group of fields that repeats as a unit:
+
+```yaml
+structs:
+  ServoMixRules:
+    fields:
+      rules:
+        repeat: MAX_SERVO_RULES
+        fields:
+          target_channel: uint8
+          input_source: uint8
+          rate: int16
+          speed: uint8
+```
+
+`repeat` accepts:
+
+| Value | Meaning |
+| --- | --- |
+| integer literal | that many iterations |
+| constant name | the constant's value |
+| preceding field name | the value of that unsigned integer field |
+| `until_end` | repeat until the payload is exhausted |
 
 Rules:
-- `default` is for non-const fields
-- `value` is for const fields
-- `default` and `value` may not both appear
-- `description` is free text
-- `required` is not allowed; use `optional` in the type instead
 
-Example const map field:
+- A repeated group has `repeat` and `fields` and no `type`
+- Groups may not nest, and `until_end` may only appear on the last group in a
+  payload
+- `until_end` is only valid inside a message payload, for the same reason as
+  `T[]`
+
+`repeat` may also be set directly on a message payload, repeating the whole
+payload:
+
 ```yaml
-geomap:
-  type: const map[string, GeometryTypes]
-  value:
-    "Point": POINT
-    "Polygon": POLYGON
+messages:
+  MSP_MOTOR_MIXER:
+    id: 0x1005
+    request: null
+    reply:
+      repeat: MAX_SUPPORTED_MOTORS
+      fields:
+        throttle: uint16
+        roll: uint16
+        pitch: uint16
+        yaw: uint16
 ```
 
-**12. Field Presence Semantics**
-- Required field: any field not marked `optional`, not `const`, and with no `default`
-- Optional field: any field with `optional`
-- Nullable field: any field with `default: null` or inline `= null`
-- Defaulted field: omission is allowed; default is applied
-- Const field: omission is allowed; fixed value is applied
+---
 
-**13. Variants**
-A parent/variants relationship is:
-- field inheritance
-- a typed variant family, equivalent to a tagged union or protobuf `oneof`
-- an implicit discriminator enum, derived from the variant model names
+## 13. Messages
 
-Syntax:
+A message is a protocol operation: an identifier plus an optional request
+payload and an optional reply payload.
+
 ```yaml
-models:
-  Task:
-    variants:
-      - MoveTask
-      - PatrolTask
-
-  MoveTask:
-    parent: Task
-    fields:
-      destination: GlobalPosition
-      speed_ms: optional float
-
-  PatrolTask:
-    parent: Task
-    fields:
-      path: list[GlobalPosition]
-      loiter_s: optional int
-
+messages:
+  MSP_FC_VERSION:
+    id: 3
+    description: "Firmware version."
+    request: null
+    reply:
+      fields:
+        major: uint8
+        minor: uint8
+        patch: uint8
 ```
 
-Rules:
-- `variants` is a direct key on the model
-- `variants` is always a list of declared child model names
-- `variants:` with no entries is valid only as an extension point for modules
-- each item must reference a declared child model
-- each referenced child model must declare `parent: <parent model>`
-- `variants` is only necessary for general ontological groups, not every model all the way down
-- enum values auto-increment from 0 in declaration order
-- the implicit enum is named `{ModelName}_type` (e.g., `Task` → `Task_type`) and is a first-class referenceable type
-- each implicit enum member is derived from the child model name by dropping the parent model's prefix when present and converting to `SCREAMING_SNAKE_CASE` (`MoveTask` under `Task` becomes `MOVE`)
-- the discriminator is reserved metadata on each child instance (accessible as `_type`). It cannot collide with user-defined field names
-- the effective shape of a child model includes:
-  - all inherited parent fields
-- the child model's own fields
-- the parent model itself is a type and may be used in fields like any other model
-- a model may define at most one `variants` block
-- a child model may also define `variants` of its own, allowing nested typed hierarchies
-- when naming a child model, if necessary, prefix only the parent's name
-- source readability takes precedence over normalized expansion
+Keys:
 
-**14. Comments**
-- YAML `#` comments are allowed anywhere YAML allows them
-- comments have no schema meaning
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `id` | yes | integer identifier, unique within the package |
+| `request` | yes | payload or `null` |
+| `reply` | yes | payload or `null` |
+| `description` | no | free text |
 
-**15. Errors**
-These are always errors:
-- unknown top-level section
-- unknown model/enum/map reference
-- duplicate names
+`request` and `reply` are written explicitly, `null` included, so that a
+message with no payload is distinguishable from an unfinished declaration.
+
+A payload is a mapping with `fields`, optionally `repeat` (section 12), and
+optionally `description`. Payload fields follow section 10 in full.
+
+Payloads are declared inline rather than referencing a named struct. Most
+payloads are used exactly once and naming them would invent hundreds of
+single-use type names. Where a shape genuinely is shared, declare a struct and
+use it as a field type:
+
+```yaml
+  MSP2_INAV_ADSB_VEHICLE:
+    id: 0x2090
+    request: null
+    reply:
+      repeat: until_end
+      fields:
+        vehicle: AdsbVehicle
+```
+
+---
+
+## 14. Comments
+
+YAML `#` comments are permitted anywhere YAML permits them and have no
+meaning to the compiler. Use `description` for text that should survive into
+generated output.
+
+---
+
+## 15. Errors
+
+The following are always errors:
+
+**Document**
+- missing `version` or `package`
+- malformed package name
+- duplicate package across loaded documents
+- unknown top-level key
+- unknown key inside any section
+- import cycle
+- unresolved import
+- ambiguous bare name that is actually referenced
+
+**Names**
+- identifier not matching the identifier regex
+- duplicate type name within a package
+- duplicate field name within a struct or payload
+- duplicate constant or message name
+- duplicate message `id` within a package
+- reference to an undeclared type, constant, or field
+
+**Types**
 - invalid type expression
-- parent is not a model
-- redefining inherited fields
-- `optional const ...`
-- list/map/object inline defaults in shorthand form
-- `required: true/false`
-- `variants` contains a value that is not a declared model
-- `variants` contains a model whose `parent` is not the declaring model
-- `package` does not match the schema file basename without `.schema.yaml`
-- missing `version`, `type`, `package`, or `tags`
-- missing `root` on a schema file
-- `root` on a schema file does not reference a declared model
-- schema file root model is missing `description`
-- top-level `description` on a schema file
-- `root` on a module file
-- `type` is not `schema` or `module`
-- a module's `extend_variants` references a parent that has no `variants` block
-- a module's `extend_variants` introduces a derived variant name that collides with an existing one
-- a module's `requires` list is not satisfied at load time
-- a module redefines or alters an existing model, enum, or field from core or another module
-- a module's model declares a `parent` that does not exist in core schema or required modules
+- multidimensional array
+- `T[N]` where `N` is not a positive integer literal
+- `T[COUNT]` where `COUNT` is not a positive integer constant
+- `T[field]` where the field does not precede it, or is not an unsigned integer
+- `T[]` outside the final position of a message payload
 
-**16. Not Supported**
-- anchors / aliases
-- multiple inheritance
-- anonymous inline models outside terminal variant leaves
-- JSON-Schema keys like `$defs`, `oneOf`, `additionalProperties`
+**Aliases, enums, bitmasks**
+- alias targeting a struct, enum, or bitmask
+- alias cycle
+- missing or non-integer `storage`
+- enum value that does not fit in `storage`
+- enum alias referencing a member that is not declared earlier
+- duplicate bit position within a bitmask
+- bit position greater than or equal to the width of `storage`
+- `zero` on an enum rather than a bitmask, or colliding with a flag name
+- a constant declaring both `configurable` and `value`, or neither
 
-**17. File Organization**
+**Structs and fields**
+- `fields` missing or empty
+- expanded field without `type`
+- `required`, `default`, or `const` keys
+- optional field followed by a required field
+- `cstring` given an array size
 
-Each schema file is a package centered on one primary model, not a subject-domain bucket. If a domain concept (e.g. electronic warfare) touches multiple ontological branches (Task, Intel, Plan, Instruction), those models belong in their respective class files, not in a single "ew.yaml."
+**Repeated groups**
+- group with both `repeat` and `type`
+- group without `fields`
+- nested repeated group
+- `until_end` outside the final position of a message payload
 
-Schema files live under `lib/schema/core/` and may be organized in subdirectories for readability. Directory placement is organizational only and is not part of the schema package. A schema file's `package` is the basename without `.schema.yaml`; `root` is the primary model in that package. The core directory layout should mirror the first-level ontology branches:
+**Messages**
+- missing `id`, `request`, or `reply`
+- payload that is neither `null` nor a mapping with `fields`
 
-```text
-schema/
-  core/
-    core.schema.yaml
-    definition/
-    struct/
-    objects/
-    control/
-    communication/
-    data/
-  modules/
-    plugin123/
-      plugin123.schema.yaml
-```
+---
 
-**17.1. One file, one package**
-- Every schema file declares a `root` model: the default entry point for the package, not a hard boundary
-- Files are not necessarily hard-bound to a model family; `command.schema.yaml` containing `Command` is a convenience, not a rule
-- Split a file only when more compartmentalization is necessary
-- A schema package may also contain local enums, maps, variants, and auxiliary models used by that package
-- The model graph is declared only by `parent` and `variants`
-- If a model branch has its own schema file, that is an organizational choice. The model graph still comes only from `parent` and `variants`.
-- Enums used exclusively by models in the file are co-located. Enums shared across files belong in the root or a common ancestor file
+## 16. Known gaps
 
-**17.2. File header**
-The header declares the package identity and primary model:
+Recorded deliberately, so they read as decisions rather than oversights.
 
-```yaml
-version: 1
-type: schema
-package: information
-root: Information
-tags:
-  - core
-```
+**Constant expressions.** INAV sizes at least one payload by
+`LED_MODE_COUNT * LED_DIRECTION_COUNT + LED_SPECIAL_COLOR_COUNT`. Version 1
+requires that be authored as a literal. Building an expression evaluator is a
+step toward reimplementing the C preprocessor, and is not worth it until
+several more cases appear.
 
-- `type` — always `schema` for class expansion files
-- `package` — package/output module identifier, matching the schema file basename
-- `root` — primary model declared in the file
-- `tags` — profile tags that classify this file for subset selection (see 17.3)
+**Untyped fields.** A small number of MSP payloads carry data with no fixed C
+type. Model these as `uint8[]` and describe the real shape in `description`.
+There is no `any`.
 
-**17.3. Tags and profiles**
-Tags classify files by domain applicability. A **profile** is a named set of tag inclusion/exclusion rules that selects a subset of the schema.
+**Deprecation metadata.** INAV tracks replaced and unimplemented commands.
+NAFML has no `deprecated` or `replaced_by` key. If it is added later it
+belongs on `messages` and should not affect wire layout.
 
-Reserved tags:
-- `core` — foundational, always included in every profile.
+**Conditional fields.** Fields that exist only under a build flag are not
+expressible. Every declaration is unconditional.
 
-Tags are additive: a file tagged `[core, plugin123]` is both foundational and plugin123-relevant. A profile that excludes `plugin123` drops any file whose tags include `plugin123` (unless the file is also tagged `core`, in which case `core` takes precedence as the always-included foundation).
+**Length-dispatched messages.** A handful of MSP commands select a payload
+shape from the received length. Where the shapes are successive prefixes of
+one another — `MSP_SET_VTX_CONFIG` has seven, each extending the last — the
+optional-tail rule in section 11 expresses them in a single declaration, which
+is what that rule is for. Where the shapes genuinely differ, as in
+`MSP_SET_OSD_CONFIG` (`selector, video_system, …` at one length versus
+`item_index, item_position` at another), NAFML cannot express them: they are
+two messages sharing one identifier, and section 15 requires identifiers be
+unique. Author the dominant shape and describe the other in `description`.
+Resolving this properly means a variant construct on `messages`, which is a
+version 2 question.
 
-Profile resolution rules:
-1. All files tagged `core` are always included
-2. A profile declares which non-core tags to include or exclude
-3. Include is the default — a profile only needs to declare exclusions
-4. If a file carries no matching include tag and no matching exclude tag, it is included by default
-5. A file excluded by a profile is entirely absent — its models, enums, and maps do not exist in that profile's schema
+**Endianness and alignment** are fixed by the backend, not declarable.
 
-Example profiles:
-```yaml
-# Normal operations — no plugin123 concepts
-profile: default
-exclude:
-  - plugin123
+---
 
-# Full plugin123 C2
-profile: plugin123_c2
-include_all: true
+## 17. Generated C
 
-# Maritime ISR — maritime + core only
-profile: maritime_isr
-include:
-  - core
-  - maritime
-exclude_untagged: true
-```
-
-**17.4. Model tree resolution**
-The ontology tree is resolved from the model graph. `parent` declares inheritance; `variants` declares typed child families. There is no separate schema-file branch graph.
-
-**18. Modules**
-
-A module is a self-contained extension that grafts domain-specific models, enums, and maps onto the existing class tree without modifying core schema files. Modules are the mechanism for domain-specific, third-party, and classified extensions.
-
-**18.1. What a module is**
-- A separate YAML manifest file, not a class expansion file
-- It declares new models, enums, and maps that attach to existing parents in the class tree
-- It does not modify, override, or redefine anything in core schema files
-- It is the extension boundary: adding capability means dropping in a module, not forking the tree
-
-**18.2. Module manifest format**
-Module files live under `lib/schema/modules/` as YAML files following the IDL syntax for enums, maps, and models, plus module-specific header fields. A domain module may be organized as a directory containing several `type: module` files. Directory placement is organizational only; each module file still has a globally unique `package`.
+Illustrative, not normative. Backends decide their own naming.
 
 ```yaml
 version: 1
-type: module
-package: ew
-description: "Electronic warfare actions, effects, protection, and spectrum management."
-tags:
-  - plugin123
-requires:
-  - core
+package: inav.gps
+
+aliases:
+  gpsCoordinate_t: int32
 
 enums:
-  EWActionType:
-    - JAM = 0
-    - SPOOF
-    - DECEIVE
-    - INTERCEPT
-    - DIRECTION_FIND
-    - MONITOR
-    - DENY
+  GpsFix:
+    prefix: GPS_FIX
+    storage: uint8
+    values:
+      - NONE = 0
+      - TWO_D = 1
+      - THREE_D = 2
 
-  JamType:
-    - NOISE = 0
-    - BARRAGE
-    - SPOT
-    - SWEEP
-    - RESPONSIVE
-    - FOLLOWER
-
-models:
-  EWActionTask:
-    parent: Task
-    fields:
-      ew_action_type: optional EWActionType
-      target_signal_id: optional string
-      platform_id: optional string
-      duration_s: optional float
-
-  JamTask:
-    parent: EWActionTask
-    fields:
-      jam_type: optional JamType
-      frequency_range_hz: optional FloatRange
-
-  DirectionFindingResult:
-    parent: Intel
-    fields:
-      bearing_from_sensor_deg: optional float
-      sensor_position: optional LLA
-      estimated_emitter_position: optional LLA
-
-  SpectrumAllocation:
-    parent: Plan
-    fields:
-      frequency_range_hz: optional FloatRange
-      assigned_to_id: optional string
-      priority: optional int
+bitmasks:
+  SensorFlags:
+    prefix: SENSOR
+    storage: uint16
+    values:
+      - ACC = 0
+      - BARO = 1
+      - MAG = 2
+      - GPS = 3
 ```
 
-Header fields (in addition to the common fields in section 3):
-- `requires` — list of tags or module packages this module depends on. The resolver must include those dependencies before this module can be applied
+```c
+typedef int32_t gpsCoordinate_t;
 
-**18.3. Rules**
-- A module's models must declare `parent` referencing a model from the core schema or from a required module
-- A module may define models that extend any branch of the class tree — this is the key difference from class expansion files, which are locked to one branch
-- All names (models, enums, maps) must be globally unique across core schema and all loaded modules
-- A module may add new variants to an existing parent's `variants` block via `extend_variants` (see 18.4)
-- A module cannot redefine, remove, or alter existing models, enums, or fields
-- Modules are optional — the core schema is complete and valid without any modules loaded
-- A module's `requires` list must be satisfied before the module is loaded; unsatisfied dependencies are an error
+typedef enum {
+    GPS_FIX_NONE = 0,
+    GPS_FIX_TWO_D = 1,
+    GPS_FIX_THREE_D = 2,
+} gpsFix_e;
 
-**18.4. Extending variants**
-When a module adds a new child to an existing parent that has a `variants` block, it uses `extend_variants` to graft new members onto the parent's discriminator:
+typedef uint16_t sensorFlags_t;
 
-```yaml
-extend_variants:
-  Task:
-    - EWTask
-  Intel:
-    - DirectionFindingResult
-    - ThreatEmitter
-  Plan:
-    - SpectrumAllocation
+enum {
+    SENSOR_ACC  = 1U << 0,
+    SENSOR_BARO = 1U << 1,
+    SENSOR_MAG  = 1U << 2,
+    SENSOR_GPS  = 1U << 3,
+};
 ```
 
-Rules:
-- `extend_variants` keys must reference models from core schema or required modules
-- The referenced parent must already have a `variants` block
-- `extend_variants` values are lists of declared child model names
-- New derived variant names must not collide with existing variant names on that parent
-- The new variant enum values auto-increment from the last existing value on the parent
-- Each model listed must declare `parent` matching the extended parent
-
-**18.5. Module resolution**
-When building a schema with modules:
-1. Resolve the core schema files and model graph
-2. For each selected module, verify `requires` are satisfied
-3. Apply `extend_variants` to graft new variant members onto existing parents
-4. Merge the module's models, enums, and maps into the global namespace
-5. Validate: no name collisions, no orphan parents, no cycles
-
-Module selection is independent of tag filtering but compatible with it:
-- A module tagged `plugin123` is excluded when the profile excludes `plugin123`
-- A module with no conflicting tags is included by default when explicitly selected
-- Modules are never auto-included — they must be explicitly selected by name or by matching tag inclusion rules
+A struct maps to a packed C struct in declaration order; a fixed array to a C
+array; a counted or open-ended array to a pointer plus a length the caller
+supplies. Aliases may be emitted as typedefs or collapsed to their primitive.
