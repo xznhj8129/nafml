@@ -3,5 +3,4 @@ __pycache__/
 
 # generated artifacts
 out/
-inav_msp.yaml
 conversion_notes.txt
