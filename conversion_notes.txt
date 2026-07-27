@@ -1,0 +1,81 @@
+enum ADCDevice.ADCDEV_2: conditional on 'STM32F4 || STM32F7 || STM32H7'; value kept
+enum ADCDevice.ADCDEV_3: conditional on 'STM32F4 || STM32F7 || STM32H7'; value kept
+enum ADCDevice.ADCDEV_MAX: conditional on 'NOT(STM32F4 || STM32F7 || STM32H7)'; value kept
+enum afatfsFileOperation_e.AFATFS_FILE_OPERATION_APPEND_SUPERCLUSTER: conditional on 'AFATFS_USE_FREEFILE'; value kept
+enum afatfsFileOperation_e.AFATFS_FILE_OPERATION_LOCKED: conditional on 'AFATFS_USE_FREEFILE'; value kept
+enum afatfsInitializationPhase_e.AFATFS_INITIALIZATION_FREEFILE_CREATE: conditional on 'AFATFS_USE_FREEFILE'; value kept
+enum afatfsInitializationPhase_e.AFATFS_INITIALIZATION_FREEFILE_CREATING: conditional on 'AFATFS_USE_FREEFILE'; value kept
+enum afatfsInitializationPhase_e.AFATFS_INITIALIZATION_FREEFILE_FAT_SEARCH: conditional on 'AFATFS_USE_FREEFILE'; value kept
+enum afatfsInitializationPhase_e.AFATFS_INITIALIZATION_FREEFILE_UPDATE_FAT: conditional on 'AFATFS_USE_FREEFILE'; value kept
+enum afatfsInitializationPhase_e.AFATFS_INITIALIZATION_FREEFILE_SAVE_DIR_ENTRY: conditional on 'AFATFS_USE_FREEFILE'; value kept
+enum afatfsInitializationPhase_e.AFATFS_INITIALIZATION_FREEFILE_LAST: conditional on 'AFATFS_USE_FREEFILE'; value kept
+enum afatfsTruncateFilePhase_e.AFATFS_TRUNCATE_FILE_ERASE_FAT_CHAIN_CONTIGUOUS: conditional on 'AFATFS_USE_FREEFILE'; value kept
+enum afatfsTruncateFilePhase_e.AFATFS_TRUNCATE_FILE_PREPEND_TO_FREEFILE: conditional on 'AFATFS_USE_FREEFILE'; value kept
+enum armingFlag_e: composite mask members ['ARMING_DISABLED_ALL_FLAGS'] - emitted as an enum
+enum BlackboxDevice.BLACKBOX_DEVICE_FLASH: conditional on 'USE_FLASHFS'; value kept
+enum BlackboxDevice.BLACKBOX_DEVICE_SDCARD: conditional on 'USE_SDCARD'; value kept
+enum BlackboxDevice.BLACKBOX_DEVICE_FILE: conditional on 'SITL_BUILD'; value kept
+enum gpsFixChar_e: unresolved value GPS_FIX_CHAR_NONE = "'-'" (source inav/src/main/telemetry/hott.c)
+enum I2CDevice.I2CDEV_4: conditional on 'USE_I2C_DEVICE_4'; value kept
+enum logicConditionsGlobalFlags_t.LOGIC_CONDITION_GLOBAL_FLAG_DISABLE_GPS_FIX: conditional on 'USE_GPS_FIX_ESTIMATION'; value kept
+enum lsm6dxxConfigMasks_e: unresolved value LSM6DXX_MASK_CTRL3_C_RESET = 'BIT(0)' (source inav/src/main/drivers/accgyro/accgyro_lsm6dxx.h)
+enum lsm6dxxConfigValues_e: unresolved value LSM6DXX_VAL_COUNTER_BDR1_DDRY_PM = 'BIT(7)' (source inav/src/main/drivers/accgyro/accgyro_lsm6dxx.h)
+enum ltm_frame_e.LTM_GFRAME: conditional on 'USE_GPS'; value kept
+enum ltm_frame_e.LTM_OFRAME: conditional on 'USE_GPS'; value kept
+enum ltm_frame_e.LTM_XFRAME: conditional on 'USE_GPS'; value kept
+enum navigationHomeFlags_t: composite mask members ['NAV_HOME_VALID_ALL'] - emitted as an enum
+enum portMode_t: composite mask members ['MODE_RXTX'] - emitted as an enum
+enum quadrant_e: composite mask members ['QUADRANT_ANY'] - emitted as an enum
+enum rc_alias_e.AUX15: conditional on 'USE_34CHANNELS'; value kept
+enum rc_alias_e.AUX16: conditional on 'USE_34CHANNELS'; value kept
+enum rc_alias_e.AUX17: conditional on 'USE_34CHANNELS'; value kept
+enum rc_alias_e.AUX18: conditional on 'USE_34CHANNELS'; value kept
+enum rc_alias_e.AUX19: conditional on 'USE_34CHANNELS'; value kept
+enum rc_alias_e.AUX20: conditional on 'USE_34CHANNELS'; value kept
+enum rc_alias_e.AUX21: conditional on 'USE_34CHANNELS'; value kept
+enum rc_alias_e.AUX22: conditional on 'USE_34CHANNELS'; value kept
+enum rc_alias_e.AUX23: conditional on 'USE_34CHANNELS'; value kept
+enum rc_alias_e.AUX24: conditional on 'USE_34CHANNELS'; value kept
+enum rc_alias_e.AUX25: conditional on 'USE_34CHANNELS'; value kept
+enum rc_alias_e.AUX26: conditional on 'USE_34CHANNELS'; value kept
+enum rc_alias_e.AUX27: conditional on 'USE_34CHANNELS'; value kept
+enum rc_alias_e.AUX28: conditional on 'USE_34CHANNELS'; value kept
+enum rc_alias_e.AUX29: conditional on 'USE_34CHANNELS'; value kept
+enum rc_alias_e.AUX30: conditional on 'USE_34CHANNELS'; value kept
+enum setting_section_e: composite mask members ['BATTERY_CONFIG_VALUE', 'EZ_TUNE_VALUE'] - emitted as an enum
+enum setting_type_e: composite mask members ['VAR_INT16', 'VAR_FLOAT', 'VAR_STRING'] - emitted as an enum
+enum stateFlags_t.GPS_ESTIMATED_FIX: conditional on 'USE_GPS_FIX_ESTIMATION'; value kept
+enum stickPositions_e: unresolved value ROL_LO = '(1 << (2 * ROLL))' (source inav/src/main/fc/rc_controls.h)
+enum timId_e.timGps: conditional on 'USE_GPS'; value kept
+enum timId_e.timAnimation: conditional on 'USE_LED_ANIMATION'; value kept
+MSP_OSD_CONFIG.reply.itemPositions: unresolved size define 'OSD_ITEM_COUNT'
+message MSP_SET_OSD_CONFIG: 2 length-dispatched variants ['dataSize >= 10', 'dataSize == 3']
+message MSP_OSD_CHAR_WRITE: 4 length-dispatched variants ['payloadSize >= OSD_CHAR_BYTES + 2 (>=66 bytes)', 'payloadSize == OSD_CHAR_BYTES + 1 (65 bytes)', 'payloadSize == OSD_CHAR_VISIBLE_BYTES + 2 (56 bytes)']
+message MSP_SET_VTX_CONFIG: 7 length-dispatched variants ['payloadSize >= 14', 'payloadSize >= 11', 'payloadSize >= 9']
+MSP_IDENT.reply: field name 'MultiWii version' is not an identifier; using 'MultiWiiversion' (fix upstream)
+MSP_IDENT.reply: field name 'Mixer Mode' is not an identifier; using 'MixerMode' (fix upstream)
+MSP_IDENT.reply: field name 'MSP Version' is not an identifier; using 'MSPVersion' (fix upstream)
+MSP_IDENT.reply: field name 'Platform Capability' is not an identifier; using 'PlatformCapability' (fix upstream)
+MSP_ACTIVEBOXES.reply.activeModes: unknown ctype 'boxBitmask_t'
+MSP_DEBUGMSG.reply: field name 'Message Text' is not an identifier; using 'MessageText' (fix upstream)
+message MSP2_COMMON_SET_TZ: 2 length-dispatched variants ['dataSize == 2', 'dataSize == 3']
+MSP2_COMMON_PG_LIST.reply: repeat 'for each PGN found' is not resolvable; decoded as until_end
+MSP2_COMMON_SERIAL_CONFIG.reply: repeat 'for each available serial port' is not resolvable; decoded as until_end
+MSP2_COMMON_SET_SERIAL_CONFIG.request: repeat 'for each port being configured' is not resolvable; decoded as until_end
+MSP2_SENSOR_HEADTRACKER.request: field name '...' is not an identifier; using 'field_' (fix upstream)
+MSP2_INAV_STATUS.reply.activeModes: unknown ctype 'boxBitmask_t'
+MSP2_INAV_OUTPUT_MAPPING.reply: repeat 'for each Motor/Servo timer' is not resolvable; decoded as until_end
+MSP2_INAV_OUTPUT_MAPPING_EXT.reply: repeat 'for each Motor/Servo timer' is not resolvable; decoded as until_end
+message MSP2_INAV_TIMER_OUTPUT_MODE: 2 length-dispatched variants ['dataSize == 0', 'dataSize == 1']
+message MSP2_INAV_OSD_LAYOUTS: 3 length-dispatched variants ['dataSize == 0', 'dataSize == 1', 'dataSize == 3']
+MSP2_PID.reply: repeat 'PID_ITEM_COUNT' is not resolvable; decoded as until_end
+MSP2_SET_PID.request: repeat 'PID_ITEM_COUNT' is not resolvable; decoded as until_end
+MSP2_INAV_ESC_RPM.reply: repeat 'getMotorCount()' is not resolvable; decoded as until_end
+MSP2_INAV_ESC_TELEM.reply.escData: unknown ctype 'escSensorData_t'
+MSP2_INAV_DRONECAN_NODES.reply.nodeData: unknown ctype 'dronecanNodeStatus_t'
+MSP2_INAV_LED_STRIP_CONFIG_EX.reply.ledConfig: unknown ctype 'ledConfig_t'
+MSP2_INAV_SET_LED_STRIP_CONFIG_EX.request.ledConfig: unknown ctype 'ledConfig_t'
+MSP2_INAV_CUSTOM_OSD_ELEMENT.reply.elementText: unresolved size define 'OSD_CUSTOM_ELEMENT_TEXT_SIZE - 1'
+MSP2_INAV_SET_CUSTOM_OSD_ELEMENTS.request.elementText: unresolved size define 'OSD_CUSTOM_ELEMENT_TEXT_SIZE - 1'
+MSP2_INAV_OUTPUT_MAPPING_EXT2.reply: repeat 'for each Motor/Servo timer' is not resolvable; decoded as until_end
+message MSP2_INAV_SET_GEOZONE_VERTEX: 2 length-dispatched variants ['polygon', 'circle']
