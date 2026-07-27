@@ -676,15 +676,6 @@ class Validator:
 # --------------------------------------------------------------------------
 
 
-def pascal(name: str) -> str:
-    parts = re.split(r"[^A-Za-z0-9]+", name)
-    out = []
-    for part in parts:
-        if not part:
-            continue
-        out.append(part[0].upper() + part[1:] if not part.isupper() else part.capitalize())
-    return "".join(out) or "X"
-
 
 def safe_attr(name: str) -> str:
     if keyword.iskeyword(name) or name in {"model_config", "model_fields"}:
@@ -780,7 +771,7 @@ class Emitter:
             elif resolved in INT_PRIMITIVES:
                 inner = base if base in self.v.aliases or base in self.v.enums else resolved
             else:
-                inner = pascal(base)
+                inner = base
             if ref.is_array:
                 inner = f"list[{inner}]"
         if ref.optional:
@@ -815,7 +806,7 @@ class Emitter:
         nested: list[str] = []
         for item in fields:
             if isinstance(item, GroupField):
-                group_name = f"{prefix}{pascal(item.name)}Item"
+                group_name = f"{prefix}{item.name}Item"
                 inner_body, inner_nested = self.render_fields(item.fields, group_name)
                 nested.extend(inner_nested)
                 block = [f"class {group_name}(BaseModel):"]
@@ -873,7 +864,7 @@ class Emitter:
     def enums(self) -> None:
         for enum in self.doc.enums:
             base = "IntFlag" if enum.is_bitmask else "IntEnum"
-            self.write(f"class {pascal(enum.name)}({base}):")
+            self.write(f"class {enum.name}({base}):")
             if enum.description:
                 self.write(f'    """{enum.description}"""')
                 self.write()
@@ -901,7 +892,7 @@ class Emitter:
 
     def structs(self) -> None:
         for struct in self.order_structs():
-            self.write(self.model_block(pascal(struct.name), struct.fields, struct.description))
+            self.write(self.model_block(struct.name, struct.fields, struct.description))
             self.write()
             self.write()
 
@@ -934,7 +925,7 @@ class Emitter:
             return
         registry: list[str] = []
         for message in self.doc.messages:
-            base = pascal(message.name)
+            base = message.name
             self.write(f"{message.name}: Final[int] = {message.id}")
             self.write()
             entry: list[str] = []

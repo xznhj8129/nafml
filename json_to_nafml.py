@@ -44,10 +44,6 @@ CTYPES = {
 
 # C types declared elsewhere in INAV; modelled as opaque aliases.
 OPAQUE = {
-    "boxBitmask_t": "uint64",
-    "ledConfig_t": "uint32",
-    "escSensorData_t": "uint32",
-    "dronecanNodeStatus_t": "uint32",
 }
 
 INT_RANGES = {
@@ -372,17 +368,16 @@ class MessageConverter:
             base = enum_name
         elif ctype in CTYPES:
             base = CTYPES[ctype]
-        elif ctype in OPAQUE:
-            base = ctype
         elif ctype and ctype.startswith("char["):
             base = "char"
             field = {**field, "array": True, "array_size": int(ctype[5:-1])}
         else:
+            base = ctype
             if enum_name:
                 note(f"{msg}.{field.get('name')}: enum {enum_name!r} was not emitted")
             else:
                 note(f"{msg}.{field.get('name')}: unknown ctype {ctype!r}")
-            return None
+            return base
 
         if not field.get("array"):
             return base

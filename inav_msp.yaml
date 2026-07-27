@@ -66,12 +66,6 @@ constants:
     type: uint8
     value: 4
 
-aliases:
-  boxBitmask_t: uint64
-  ledConfig_t: uint32
-  escSensorData_t: uint32
-  dronecanNodeStatus_t: uint32
-
 enums:
   accelerationSensor_e:
     description: From inav/src/main/sensors/acceleration.h
@@ -11553,7 +11547,7 @@ messages:
           description: Number of motors reporting telemetry (`getMotorCount()`)
 
         escData:
-          type: escSensorData_t[]
+          type: escSensorData_t
           description: Array of `escSensorData_t` structures containing voltage, current, temp, RPM, errors etc. for each ESC
 
   MSP2_INAV_DRONECAN_NODES:
@@ -11567,7 +11561,7 @@ messages:
           description: Number of detected DroneCAN nodes
 
         nodeData:
-          type: dronecanNodeStatus_t[]
+          type: dronecanNodeStatus_t
           description: 'Array of per-node status records, one per detected node. Each record: nodeID(1)+health(1)+mode(1)+last_seen_ms(4) = 7 bytes. Full detail available via MSP2_INAV_DRONECAN_NODE_INFO.'
 
   MSP2_INAV_DRONECAN_NODE_INFO:
